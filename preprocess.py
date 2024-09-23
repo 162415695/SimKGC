@@ -299,6 +299,8 @@ def main():
             all_examples += preprocess_fb15k237(path)
         elif args.task.lower() in ['wiki5m_trans', 'wiki5m_ind']:
             all_examples += preprocess_wiki5m(path, is_train=(path == args.train_path))
+        elif args.task.lower() in ['data_bert','data_llm','data_ori']:
+            all_examples += preprocess_wn18rr(path)
         else:
             assert False, 'Unknown task: {}'.format(args.task)
 
@@ -308,6 +310,8 @@ def main():
         id2text = {k: v[2] for k, v in fb15k_id2ent.items()}
     elif args.task.lower() in ['wiki5m_trans', 'wiki5m_ind']:
         id2text = wiki5m_id2text
+    elif args.task.lower() in ['data_bert','data_llm','data_ori']:
+        id2text = {k: v[2] for k, v in wn18rr_id2ent.items()}
     else:
         assert False, 'Unknown task: {}'.format(args.task)
 
