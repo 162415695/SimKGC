@@ -5,7 +5,7 @@ import shutil
 
 import numpy as np
 import torch.nn as nn
-
+import random
 from logger_config import logger
 
 
@@ -36,7 +36,7 @@ def report_num_trainable_parameters(model: torch.nn.Module) -> int:
             num_parameters += np.prod(list(p.size()))
             logger.info('{}: {}'.format(name, np.prod(list(p.size()))))
 
-    logger.info('Number of parameters: {}M'.format(num_parameters // 10**6))
+    logger.info('Number of parameters: {}M'.format(num_parameters // 10 ** 6))
     return num_parameters
 
 
@@ -65,6 +65,7 @@ def move_to_cuda(sample):
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
+
     def __init__(self, name, fmt=':f'):
         self.name = name
         self.fmt = fmt
@@ -102,3 +103,71 @@ class ProgressMeter(object):
         num_digits = len(str(num_batches // 1))
         fmt = '{:' + str(num_digits) + 'd}'
         return '[' + fmt + '/' + fmt.format(num_batches) + ']'
+
+
+from torch.nn.utils.rnn import pad_sequence
+
+import torch
+from torch.nn.utils.rnn import pad_sequence
+
+def pad_and_stack(sequences, padding_value=0):
+    # Find the maximum length
+    max_length = max(seq.size(1) for seq in sequences)
+
+    # Pad each sequence to the maximum length
+    padded = [torch.cat([seq, torch.full((seq.size(0), max_length - seq.size(1)), padding_value)], dim=1)
+              if seq.size(1) < max_length else seq for seq in sequences]
+
+    # Stack them into a single tensor
+    return torch.stack(padded)
+def concatenate_dict_arrays(dict_list, another_dict):
+    result = {}
+
+    for key in another_dict:
+        if key in ['tail_token_ids', 'tail_mask', 'tail_token_type_ids']:
+            arrays_to_concatenate = []
+
+            # 添加 another_dict 中的数据
+            arrays_to_concatenate.append(another_dict[key])
+
+            for d in dict_list:
+                if key in d:
+                    arrays_to_concatenate.append(d[key])
+            shapes = [array.shape for array in arrays_to_concatenate]
+            print(f"Shapes for key '{key}' : {shapes}")
+
+            # 使用 pad_and_stack 函数进行填充
+            padded_arrays = pad_and_stack(arrays_to_concatenate)
+            print('+++++++++')
+            # 检查填充后的形状是否一致
+            shapes = [array.shape for array in padded_arrays]
+            print(f"Shapes for key '{key}' after padding: {shapes}")
+
+            if len(set(shape[1:] for shape in shapes)) != 1:
+                raise ValueError(f"Arrays for key '{key}' have incompatible shapes after padding: {shapes}")
+            print('////////////////')
+            # 合并数组
+            combined_array = torch.cat([tensor for tensor in padded_arrays], dim=0)
+            shapes = combined_array.shape
+            print(f"Shapes for key '{key}' after padding: {shapes}")
+
+            result[key] = combined_array
+
+    return result
+
+
+def generate_random_numbers(count, not_equal, less_than):
+    """
+    生成指定数量的不重复且不等于指定值的小于给定值的非负整数。
+
+    :param count: 生成数的数量。
+    :param not_equal: 生成数不等于的值。
+    :param less_than: 生成数小于的值。
+    :return: 包含生成数的列表。
+    """
+    numbers = set()
+    while len(numbers) < count:
+        num = random.randint(0, less_than - 1)
+        if num != not_equal:
+            numbers.add(num)
+    return list(numbers)

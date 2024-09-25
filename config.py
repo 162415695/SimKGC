@@ -78,7 +78,11 @@ parser.add_argument('--neighbor-weight', default=0.0, type=float,
                     help='weight for re-ranking entities')
 parser.add_argument('--eval-model-path', default='', type=str, metavar='N',
                     help='path to model, only used for evaluation')
-
+parser.add_argument('--add-extra-batch', action='store_true',
+                    help='add predict tail entity or not')
+parser.add_argument('--extra-batch-limit', default=0, type=int,
+                    help='-1 means unlimited upper limit of tail entity,'
+                         'other number means number\'s extra batch size of add predict tail entity')
 args = parser.parse_args()
 
 assert not args.train_path or os.path.exists(args.train_path)

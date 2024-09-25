@@ -83,19 +83,30 @@ class CustomBertModel(nn.Module, ABC):
                 'tail_vector': tail_vector,
                 'head_vector': head_vector}
 
-    def compute_logits(self, output_dict: dict, batch_dict: dict) -> dict:
-        hr_vector, tail_vector = output_dict['hr_vector'], output_dict['tail_vector']
+    def compute_logits(self, output_dict: dict, batch_dict: dict, extra_tail=None) -> dict:
+        hr_vector, tail_vector = [], []
+        if extra_tail is None:
+            hr_vector, tail_vector = output_dict['hr_vector'], output_dict['tail_vector']
+        else:
+            total_tail = [output_dict['tail_vector']]
+            for vector in extra_tail:
+                total_tail.append(vector)
+            hr_vector, tail_vector = output_dict['hr_vector'], torch.cat(total_tail, dim=0)
         batch_size = hr_vector.size(0)
         labels = torch.arange(batch_size).to(hr_vector.device)
-
         logits = hr_vector.mm(tail_vector.t())
         if self.training:
             logits -= torch.zeros(logits.size()).fill_diagonal_(self.add_margin).to(logits.device)
         logits *= self.log_inv_t.exp()
 
         triplet_mask = batch_dict.get('triplet_mask', None)
+
         if triplet_mask is not None:
-            logits.masked_fill_(~triplet_mask, -1e4)
+            triplet_mask = triplet_mask.bool()
+            print(logits.size())
+            print(logits[:, :len(triplet_mask[0])].size())
+            print(triplet_mask.size())
+            logits[:, :len(triplet_mask[0])] = logits[:, :len(triplet_mask[0])].masked_fill(~triplet_mask, -1e4)
 
         if self.pre_batch > 0 and self.training:
             pre_batch_logits = self._compute_pre_batch_logits(hr_vector, tail_vector, batch_dict)
@@ -105,6 +116,7 @@ class CustomBertModel(nn.Module, ABC):
             head_vector = output_dict['head_vector']
             self_neg_logits = torch.sum(hr_vector * head_vector, dim=1) * self.log_inv_t.exp()
             self_negative_mask = batch_dict['self_negative_mask']
+            self_negative_mask = self_negative_mask.bool()
             self_neg_logits.masked_fill_(~self_negative_mask, -1e4)
             logits = torch.cat([logits, self_neg_logits.unsqueeze(1)], dim=-1)
 
