@@ -103,9 +103,6 @@ class CustomBertModel(nn.Module, ABC):
 
         if triplet_mask is not None:
             triplet_mask = triplet_mask.bool()
-            print(logits.size())
-            print(logits[:, :len(triplet_mask[0])].size())
-            print(triplet_mask.size())
             logits[:, :len(triplet_mask[0])] = logits[:, :len(triplet_mask[0])].masked_fill(~triplet_mask, -1e4)
 
         if self.pre_batch > 0 and self.training:

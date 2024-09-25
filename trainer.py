@@ -113,8 +113,6 @@ class Trainer:
         candidate_index = [ind for ind in range(len(self.valid_loader))]
         self.model.eval()
         total_tail_id = []
-        if len(total_tail_id) != len(set(total_tail_id)):
-            print("xxx special error")
         tail_vector = []
         with torch.no_grad():
             for temp_index in candidate_index:
@@ -133,7 +131,6 @@ class Trainer:
                                                  mask=temp_data['tail_mask'],
                                                  token_type_ids=temp_data['tail_token_type_ids']
                                                  ))
-        print('当前额外batch为' + str(self.extra_batch_size) + ',目前尾实体数量为' + str(len(total_tail_id)))
         for i, batch_dict in total_valid_batch.items():
             batch_size = len(batch_dict['batch_data'])
             if torch.cuda.is_available():
@@ -178,10 +175,6 @@ class Trainer:
             candidate_index = generate_random_numbers(self.extra_batch_size, i, len(total_train_batch))
             self.model.eval()
             total_tail_id = [d.tail_id for d in batch_dict['batch_data']]
-            print(len(total_tail_id))
-            print(len(set(total_tail_id)))
-            if len(total_tail_id)!=len(set(total_tail_id)):
-                print("xxx special error")
             tail_vector = []
             with torch.no_grad():
                 for temp_index in candidate_index:
@@ -202,7 +195,6 @@ class Trainer:
                                                      mask=temp_data['tail_mask'],
                                                      token_type_ids=temp_data['tail_token_type_ids']
                                                      ))
-            print('当前额外batch为' + str(self.extra_batch_size) + ',目前尾实体数量为' +str(len(total_tail_id)))
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
@@ -248,6 +240,9 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
                 self.optimizer.step()
             self.scheduler.step()
+
+            if i % self.args.print_freq == 0:
+                progress.display(i)
             if self.extra_flag:
                 if acc1 > 90:
                     print("acc1已超过90%,添加额外待预测的尾实体")
@@ -262,9 +257,6 @@ class Trainer:
                         else:
                             print("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
                             self.extra_flag = False
-            if i % self.args.print_freq == 0:
-                progress.display(i)
-
             if (i + 1) % self.args.eval_every_n_step == 0:
                 self._run_eval(epoch=epoch, step=i + 1)
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
