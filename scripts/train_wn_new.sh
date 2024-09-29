@@ -17,7 +17,7 @@ fi
 
 python3 -u main.py \
 --model-dir "${OUTPUT_DIR}" \
---pretrained-model bert-base-uncased \
+--pretrained-model /mnt/data/yhy/model/bert-base-uncased \
 --pooling mean \
 --lr 5e-5 \
 --use-link-graph \
@@ -27,12 +27,11 @@ python3 -u main.py \
 --batch-size 512 \
 --print-freq 20 \
 --additive-margin 0.02 \
---use-amp \
 --use-self-negative \
 --pre-batch 0 \
 --finetune-t \
 --epochs 50 \
 --workers 4 \
---max-to-keep 3 \
+--max-to-keep 5 \
 --add-extra-batch \
 --extra-batch-limit -1 "$@"

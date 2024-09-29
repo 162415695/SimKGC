@@ -5,16 +5,16 @@ import shutil
 import numpy as np
 import torch.nn as nn
 import torch.utils.data
-
+import predict
 from typing import Dict
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 from transformers import AdamW
 from copy import deepcopy
-
+import evaluate
 from doc import Dataset, collate
 from utils import AverageMeter, ProgressMeter
 from utils import save_checkpoint, delete_old_ckt, report_num_trainable_parameters, move_to_cuda, get_model_obj, \
-    concatenate_dict_arrays, generate_random_numbers
+    concatenate_dict_arrays, generate_random_numbers, copy_checkpoint
 from metric import accuracy
 from models import build_model, ModelOutput
 from dict_hub import build_tokenizer
@@ -84,11 +84,6 @@ class Trainer:
 
     @torch.no_grad()
     def _run_eval(self, epoch, step=0):
-        metric_dict = self.eval_epoch(epoch)
-        is_best = self.valid_loader and (self.best_metric is None or metric_dict['Acc@1'] > self.best_metric['Acc@1'])
-        if is_best:
-            self.best_metric = metric_dict
-
         filename = '{}/checkpoint_{}_{}.mdl'.format(self.args.model_dir, epoch, step)
         if step == 0:
             filename = '{}/checkpoint_epoch{}.mdl'.format(self.args.model_dir, epoch)
@@ -96,9 +91,15 @@ class Trainer:
             'epoch': epoch,
             'args': self.args.__dict__,
             'state_dict': self.model.state_dict(),
-        }, is_best=is_best, filename=filename)
+        }, filename=filename)
         delete_old_ckt(path_pattern='{}/checkpoint_*.mdl'.format(self.args.model_dir),
                        keep=self.args.max_to_keep)
+        metric_dict = self.eval_epoch(filename)
+        is_best = self.valid_loader and (self.best_metric is None or metric_dict['Acc@1'] > self.best_metric['Acc@1'])
+        if is_best:
+            self.best_metric = metric_dict
+        copy_checkpoint(filename,is_best)
+
 
     @torch.no_grad()
     def eval_epoch(self, epoch) -> Dict:
@@ -171,7 +172,6 @@ class Trainer:
         total_train_batch = {i: k for i, k in enumerate(self.train_loader)}
         for i, batch_dict in total_train_batch.items():
             model = get_model_obj(self.model)
-            model.tail_bert = deepcopy(model.hr_bert)
             candidate_index = generate_random_numbers(self.extra_batch_size, i, len(total_train_batch))
             self.model.eval()
             total_tail_id = [d.tail_id for d in batch_dict['batch_data']]
@@ -208,7 +208,6 @@ class Trainer:
             else:
                 outputs = self.model(**batch_dict)
 
-
             outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
                                            extra_tail=tail_vector)
             outputs = ModelOutput(**outputs)
@@ -243,22 +242,24 @@ class Trainer:
 
             if i % self.args.print_freq == 0:
                 progress.display(i)
-            if self.extra_flag:
-                if acc1 > 90:
-                    print("acc1已超过90%,添加额外待预测的尾实体")
-                    if self.extra_batch_size==0:
-                        self.extra_batch_size =1
-                    else:
-                        if self.extra_batch_size < self.extra_batch_limit:
-                            self.extra_batch_size *= 2
-                            if self.extra_batch_size > self.extra_batch_limit:
-                                self.extra_batch_size = self.extra_batch_limit
+                if self.extra_flag:
+                    if acc1 > 90:
+
+                        print("acc1已超过90%,添加额外待预测的尾实体")
+                        if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
+                            self.extra_batch_size = 1
+                            for param_group in self.optimizer.param_groups:
+                                param_group['lr'] = self.args.lr
                             print("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
                         else:
-                            print("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
-                            self.extra_flag = False
-            if (i + 1) % self.args.eval_every_n_step == 0:
-                self._run_eval(epoch=epoch, step=i + 1)
+                            if self.extra_batch_size < self.extra_batch_limit:
+                                self.extra_batch_size *= 2
+                                if self.extra_batch_size > self.extra_batch_limit:
+                                    self.extra_batch_size = self.extra_batch_limit
+                                print("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
+                            else:
+                                print("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
+                                self.extra_flag = False
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
 
     def _setup_training(self):

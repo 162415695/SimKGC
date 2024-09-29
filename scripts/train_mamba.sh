@@ -15,7 +15,7 @@ if [ -z "$DATA_DIR" ]; then
   DATA_DIR="${DIR}/data/${TASK}"
 fi
 
-OUTPUT_DIR="${DIR}/checkpoint/${TASK}_mamba$(date +%F-%H%M.%S)"
+OUTPUT_DIR="${DIR}/checkpoint/${TASK}_mamba_130m_new"
 python3 -u main.py \
 --model-dir "${OUTPUT_DIR}" \
 --pretrained-model "/mnt/data/yhy/model/mamba-130m-hf" \
@@ -25,7 +25,7 @@ python3 -u main.py \
 --train-path "${DATA_DIR}/train.txt.json" \
 --valid-path "${DATA_DIR}/valid.txt.json" \
 --task ${TASK} \
---batch-size 1024 \
+--batch-size 256 \
 --print-freq 20 \
 --additive-margin 0.02 \
 --use-amp \
@@ -34,4 +34,6 @@ python3 -u main.py \
 --finetune-t \
 --epochs 50 \
 --workers 4 \
---max-to-keep 5 "$@"
+--max-to-keep 5 \
+--add-extra-batch \
+--extra-batch-limit -1 "$@"

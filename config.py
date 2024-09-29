@@ -3,7 +3,7 @@ import random
 import torch
 import argparse
 import warnings
-
+import numpy as np
 import torch.backends.cudnn as cudnn
 
 parser = argparse.ArgumentParser(description='SimKGC arguments')
@@ -97,6 +97,8 @@ else:
     args.model_dir = os.path.dirname(args.eval_model_path)
 
 if args.seed is not None:
+    torch.cuda.manual_seed(args.seed)
+    np.random.seed(args.seed)
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     cudnn.deterministic = True

@@ -13,13 +13,13 @@ class AttrDict:
     pass
 
 
-def save_checkpoint(state: dict, is_best: bool, filename: str):
+def save_checkpoint(state: dict, filename: str):
     torch.save(state, filename)
+
+def copy_checkpoint(filename: str, is_best: bool):
     if is_best:
         shutil.copyfile(filename, os.path.dirname(filename) + '/model_best.mdl')
     shutil.copyfile(filename, os.path.dirname(filename) + '/model_last.mdl')
-
-
 def delete_old_ckt(path_pattern: str, keep=5):
     files = sorted(glob.glob(path_pattern), key=os.path.getmtime, reverse=True)
     for f in files[keep:]:
