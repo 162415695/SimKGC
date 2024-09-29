@@ -16,6 +16,11 @@ if args.use_link_graph:
     # make the lazy data loading happen
     get_link_graph()
 
+def _convert_is_test_2_true():
+    args.is_test = True
+
+def _convert_is_test_2_false():
+    args.is_test = False
 
 def _custom_tokenize(text: str,
                      text_pair: Optional[str] = None) -> dict:

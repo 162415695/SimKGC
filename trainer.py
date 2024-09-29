@@ -1,17 +1,22 @@
+import os
 import glob
 import json
 import torch
 import shutil
 import numpy as np
+import torch
 import torch.nn as nn
 import torch.utils.data
 import predict
+import tqdm
+from time import time
 from typing import Dict
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 from transformers import AdamW
 from copy import deepcopy
-import evaluate
-from doc import Dataset, collate
+from typing import List, Tuple
+from evaluate import entity_dict, compute_metrics, PredInfo
+from doc import Dataset, collate, _convert_is_test_2_true, _convert_is_test_2_false, load_data, Example
 from utils import AverageMeter, ProgressMeter
 from utils import save_checkpoint, delete_old_ckt, report_num_trainable_parameters, move_to_cuda, get_model_obj, \
     concatenate_dict_arrays, generate_random_numbers, copy_checkpoint
@@ -94,12 +99,24 @@ class Trainer:
         }, filename=filename)
         delete_old_ckt(path_pattern='{}/checkpoint_*.mdl'.format(self.args.model_dir),
                        keep=self.args.max_to_keep)
-        metric_dict = self.eval_epoch(filename)
-        is_best = self.valid_loader and (self.best_metric is None or metric_dict['Acc@1'] > self.best_metric['Acc@1'])
+        # metric_dict = self.eval_epoch(filename)
+        metric_dict = self.eval_entity(filename)
+        is_best = self.best_metric is None or (metric_dict['hit@1'] > self.best_metric['hit@1'])
         if is_best:
             self.best_metric = metric_dict
         copy_checkpoint(filename,is_best)
 
+    @torch.no_grad()
+    def eval_entity(self, epoch) -> Dict:
+        self.model.eval()
+        _convert_is_test_2_true()
+        entity_tensor = self.predict_by_entities(entity_dict.entity_exs)
+        forward_metrics = self.eval_single_direction(entity_tensor=entity_tensor, eval_forward=True)
+        backward_metrics = self.eval_single_direction(entity_tensor=entity_tensor, eval_forward=False)
+        metrics = {k: round((forward_metrics[k] + backward_metrics[k]) / 2, 4) for k in forward_metrics}
+        logger.info('Averaged metrics: {}'.format(metrics))
+        _convert_is_test_2_false()
+        return metrics
 
     @torch.no_grad()
     def eval_epoch(self, epoch) -> Dict:
@@ -281,3 +298,83 @@ class Trainer:
                                                    num_training_steps=num_training_steps)
         else:
             assert False, 'Unknown lr scheduler: {}'.format(self.args.scheduler)
+
+    @torch.no_grad()
+    def predict_by_examples(self, examples: List[Example]):
+        data_loader = torch.utils.data.DataLoader(
+            Dataset(path='', examples=examples, task=self.args.task),
+            num_workers=1,
+            batch_size=max(self.args.batch_size, 512),
+            collate_fn=collate,
+            shuffle=False)
+
+        hr_tensor_list, tail_tensor_list = [], []
+        for idx, batch_dict in enumerate(data_loader):
+            if torch.cuda.is_available():
+                batch_dict = move_to_cuda(batch_dict)
+            outputs = self.model(**batch_dict)
+            hr_tensor_list.append(outputs['hr_vector'])
+            tail_tensor_list.append(outputs['tail_vector'])
+
+        return torch.cat(hr_tensor_list, dim=0), torch.cat(tail_tensor_list, dim=0)
+
+    @torch.no_grad()
+    def predict_by_entities(self, entity_exs) -> torch.tensor:
+        examples = []
+        for entity_ex in entity_exs:
+            examples.append(Example(head_id='', relation='',
+                                    tail_id=entity_ex.entity_id))
+        data_loader = torch.utils.data.DataLoader(
+            Dataset(path='', examples=examples, task=self.args.task),
+            num_workers=2,
+            batch_size=max(self.args.batch_size, 1024),
+            collate_fn=collate,
+            shuffle=False)
+
+        ent_tensor_list = []
+        for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
+            batch_dict['only_ent_embedding'] = True
+            if torch.cuda.is_available():
+                batch_dict = move_to_cuda(batch_dict)
+            outputs = self.model(**batch_dict)
+            ent_tensor_list.append(outputs['ent_vectors'])
+
+        return torch.cat(ent_tensor_list, dim=0)
+
+    @torch.no_grad()
+    def eval_single_direction(self,
+                            entity_tensor: torch.tensor,
+                            eval_forward=True,
+                            batch_size=256) -> dict:
+        start_time = time()
+        examples = load_data(self.args.valid_path, add_forward_triplet=eval_forward, add_backward_triplet=not eval_forward)
+
+        hr_tensor, _ = self.predict_by_examples(examples)
+        hr_tensor = hr_tensor.to(entity_tensor.device)
+        target = [entity_dict.entity_to_idx(ex.tail_id) for ex in examples]
+        logger.info('predict tensor done, compute metrics...')
+
+        topk_scores, topk_indices, metrics, ranks = compute_metrics(hr_tensor=hr_tensor, entities_tensor=entity_tensor,
+                                                                    target=target, examples=examples,
+                                                                    batch_size=batch_size)
+        eval_dir = 'forward' if eval_forward else 'backward'
+        logger.info('{} metrics: {}'.format(eval_dir, json.dumps(metrics)))
+
+        pred_infos = []
+        for idx, ex in enumerate(examples):
+            cur_topk_scores = topk_scores[idx]
+            cur_topk_indices = topk_indices[idx]
+            pred_idx = cur_topk_indices[0]
+            cur_score_info = {entity_dict.get_entity_by_idx(topk_idx).entity: round(topk_score, 3)
+                            for topk_score, topk_idx in zip(cur_topk_scores, cur_topk_indices)}
+
+            pred_info = PredInfo(head=ex.head, relation=ex.relation,
+                                tail=ex.tail, pred_tail=entity_dict.get_entity_by_idx(pred_idx).entity,
+                                pred_score=round(cur_topk_scores[0], 4),
+                                topk_score_info=json.dumps(cur_score_info),
+                                rank=ranks[idx],
+                                correct=pred_idx == target[idx])
+            pred_infos.append(pred_info)
+
+        logger.info('Evaluation takes {} seconds'.format(round(time() - start_time, 3)))
+        return metrics
