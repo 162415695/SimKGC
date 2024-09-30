@@ -39,7 +39,7 @@ class Trainer:
         logger.info(self.model)
         self._setup_training()
         self.extra_batch_size = 0
-        self.extra_flag = True
+        self.extra_flag = self.args.add_extra_batch
         # define loss function (criterion) and optimizer
         self.criterion = nn.CrossEntropyLoss().cuda()
 
@@ -76,7 +76,7 @@ class Trainer:
         self.extra_batch_limit = args.extra_batch_limit
         if self.extra_batch_limit == -1 or self.extra_batch_limit > len(self.train_loader):
             self.extra_batch_limit = len(self.train_loader) - 1
-            print("额外batch上限因为数据量调整为" + str(self.extra_batch_limit))
+            logger.info("额外batch上限因为数据量调整为" + str(self.extra_batch_limit))
 
     def train_loop(self):
         if self.args.use_amp:
@@ -207,11 +207,19 @@ class Trainer:
                         temp_data[key] = np.delete(temp_data[key], indices_to_remove, axis=0)
 
                     temp_data = move_to_cuda(temp_data)
-                    tail_vector.append(model._encode(model.tail_bert,
-                                                     token_ids=temp_data['tail_token_ids'],
-                                                     mask=temp_data['tail_mask'],
-                                                     token_type_ids=temp_data['tail_token_type_ids']
-                                                     ))
+                    if self.args.use_amp:
+                        with torch.cuda.amp.autocast():
+                            tail_vector.append(model._encode(model.tail_bert,
+                                                            token_ids=temp_data['tail_token_ids'],
+                                                            mask=temp_data['tail_mask'],
+                                                            token_type_ids=temp_data['tail_token_type_ids']
+                                                            ))
+                    else:
+                        tail_vector.append(model._encode(model.tail_bert,
+                                                        token_ids=temp_data['tail_token_ids'],
+                                                        mask=temp_data['tail_mask'],
+                                                        token_type_ids=temp_data['tail_token_type_ids']
+                                                        ))
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
@@ -262,20 +270,20 @@ class Trainer:
                 if self.extra_flag:
                     if acc1 > 90:
 
-                        print("acc1已超过90%,添加额外待预测的尾实体")
+                        logger.info("acc1已超过90%,添加额外待预测的尾实体")
                         if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
                             self.extra_batch_size = 1
                             for param_group in self.optimizer.param_groups:
                                 param_group['lr'] = self.args.lr
-                            print("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
+                            logger.info("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
                         else:
                             if self.extra_batch_size < self.extra_batch_limit:
                                 self.extra_batch_size *= 2
                                 if self.extra_batch_size > self.extra_batch_limit:
                                     self.extra_batch_size = self.extra_batch_limit
-                                print("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
+                                logger.info("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
                             else:
-                                print("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
+                                logger.info("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
                                 self.extra_flag = False
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
 

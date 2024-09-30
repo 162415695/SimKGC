@@ -134,22 +134,22 @@ def concatenate_dict_arrays(dict_list, another_dict):
                 if key in d:
                     arrays_to_concatenate.append(d[key])
             shapes = [array.shape for array in arrays_to_concatenate]
-            print(f"Shapes for key '{key}' : {shapes}")
+            logger.info(f"Shapes for key '{key}' : {shapes}")
 
             # 使用 pad_and_stack 函数进行填充
             padded_arrays = pad_and_stack(arrays_to_concatenate)
-            print('+++++++++')
+            logger.info('+++++++++')
             # 检查填充后的形状是否一致
             shapes = [array.shape for array in padded_arrays]
-            print(f"Shapes for key '{key}' after padding: {shapes}")
+            logger.info(f"Shapes for key '{key}' after padding: {shapes}")
 
             if len(set(shape[1:] for shape in shapes)) != 1:
                 raise ValueError(f"Arrays for key '{key}' have incompatible shapes after padding: {shapes}")
-            print('////////////////')
+            logger.info('////////////////')
             # 合并数组
             combined_array = torch.cat([tensor for tensor in padded_arrays], dim=0)
             shapes = combined_array.shape
-            print(f"Shapes for key '{key}' after padding: {shapes}")
+            logger.info(f"Shapes for key '{key}' after padding: {shapes}")
 
             result[key] = combined_array
 
