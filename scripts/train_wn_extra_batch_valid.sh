@@ -37,7 +37,7 @@ python3 -u main.py \
 --neighbor-weight "${neighbor_weight}" \
 --rerank-n-hop "${rerank_n_hop}" \
 --batch-size 1024 \
---print-freq 20 \
+--print-freq 1 \
 --additive-margin 0.02 \
 --use-amp \
 --use-self-negative \

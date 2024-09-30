@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from dataclasses import dataclass
 from transformers import AutoModel, AutoConfig
-
+from logger_config import logger
 from triplet_mask import construct_mask
 
 

@@ -157,7 +157,7 @@ class Trainer:
         with torch.no_grad():
             for temp_index in candidate_index:
                 indices_to_remove = []
-                temp_data = total_valid_batch[temp_index]
+                temp_data = total_valid_batch[temp_index].copy()
                 for f in range(len(temp_data['batch_data'])):
                     if temp_data['batch_data'][f].tail_id in total_tail_id:
                         indices_to_remove.append(f)
@@ -218,7 +218,7 @@ class Trainer:
             with torch.no_grad():
                 for temp_index in candidate_index:
                     indices_to_remove = []
-                    temp_data = total_train_batch[temp_index]
+                    temp_data = total_train_batch[temp_index].copy()
                     for f in range(len(temp_data['batch_data'])):
                         if temp_data['batch_data'][f].tail_id in total_tail_id:
                             indices_to_remove.append(f)
@@ -263,6 +263,7 @@ class Trainer:
             # head + relation -> tail
             loss = self.criterion(logits, labels)
             # tail -> head + relation
+
             loss += self.criterion(logits[:, :batch_size].t(), labels)
 
             acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
@@ -295,8 +296,6 @@ class Trainer:
                         logger.info("acc1已超过90%,添加额外待预测的尾实体")
                         if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
                             self.extra_batch_size = 1
-                            for param_group in self.optimizer.param_groups:
-                                param_group['lr'] = self.args.lr
                             logger.info("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
                         else:
                             if self.extra_batch_size < self.extra_batch_limit:
