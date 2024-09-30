@@ -24,6 +24,18 @@ from metric import accuracy
 from models import build_model, ModelOutput
 from dict_hub import build_tokenizer
 from logger_config import logger
+from collections import OrderedDict
+
+
+def model_load(ckt_path):
+    ckt_dict = torch.load(ckt_path, map_location=lambda storage, loc: storage)
+    state_dict = ckt_dict['state_dict']
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            k = k[len('module.'):]
+        new_state_dict[k] = v
+    return new_state_dict
 
 
 class Trainer:
@@ -36,6 +48,16 @@ class Trainer:
         # create model
         logger.info("=> creating model")
         self.model = build_model(self.args)
+        if args.pretrained_ckpt is not None:
+            logger.info("读取已有模型权重")
+            try:
+                self.model.load_state_dict(model_load(ckt_path=args.pretrained_ckpt), strict=True)
+                if torch.cuda.is_available():
+                    self.model.cuda()
+                    self.use_cuda = True
+                logger.info('Load model from {} successfully'.format(args.pretrained_ckpt))
+            except:
+                logger.info("读取失败")
         logger.info(self.model)
         self._setup_training()
         self.extra_batch_size = 0
@@ -104,7 +126,7 @@ class Trainer:
         is_best = self.best_metric is None or (metric_dict['hit@1'] > self.best_metric['hit@1'])
         if is_best:
             self.best_metric = metric_dict
-        copy_checkpoint(filename,is_best)
+        copy_checkpoint(filename, is_best)
 
     @torch.no_grad()
     def eval_entity(self, epoch) -> Dict:
@@ -210,16 +232,16 @@ class Trainer:
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
                             tail_vector.append(model._encode(model.tail_bert,
-                                                            token_ids=temp_data['tail_token_ids'],
-                                                            mask=temp_data['tail_mask'],
-                                                            token_type_ids=temp_data['tail_token_type_ids']
-                                                            ))
+                                                             token_ids=temp_data['tail_token_ids'],
+                                                             mask=temp_data['tail_mask'],
+                                                             token_type_ids=temp_data['tail_token_type_ids']
+                                                             ))
                     else:
                         tail_vector.append(model._encode(model.tail_bert,
-                                                        token_ids=temp_data['tail_token_ids'],
-                                                        mask=temp_data['tail_mask'],
-                                                        token_type_ids=temp_data['tail_token_type_ids']
-                                                        ))
+                                                         token_ids=temp_data['tail_token_ids'],
+                                                         mask=temp_data['tail_mask'],
+                                                         token_type_ids=temp_data['tail_token_type_ids']
+                                                         ))
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
@@ -351,11 +373,12 @@ class Trainer:
 
     @torch.no_grad()
     def eval_single_direction(self,
-                            entity_tensor: torch.tensor,
-                            eval_forward=True,
-                            batch_size=256) -> dict:
+                              entity_tensor: torch.tensor,
+                              eval_forward=True,
+                              batch_size=256) -> dict:
         start_time = time()
-        examples = load_data(self.args.valid_path, add_forward_triplet=eval_forward, add_backward_triplet=not eval_forward)
+        examples = load_data(self.args.valid_path, add_forward_triplet=eval_forward,
+                             add_backward_triplet=not eval_forward)
 
         hr_tensor, _ = self.predict_by_examples(examples)
         hr_tensor = hr_tensor.to(entity_tensor.device)
@@ -374,14 +397,14 @@ class Trainer:
             cur_topk_indices = topk_indices[idx]
             pred_idx = cur_topk_indices[0]
             cur_score_info = {entity_dict.get_entity_by_idx(topk_idx).entity: round(topk_score, 3)
-                            for topk_score, topk_idx in zip(cur_topk_scores, cur_topk_indices)}
+                              for topk_score, topk_idx in zip(cur_topk_scores, cur_topk_indices)}
 
             pred_info = PredInfo(head=ex.head, relation=ex.relation,
-                                tail=ex.tail, pred_tail=entity_dict.get_entity_by_idx(pred_idx).entity,
-                                pred_score=round(cur_topk_scores[0], 4),
-                                topk_score_info=json.dumps(cur_score_info),
-                                rank=ranks[idx],
-                                correct=pred_idx == target[idx])
+                                 tail=ex.tail, pred_tail=entity_dict.get_entity_by_idx(pred_idx).entity,
+                                 pred_score=round(cur_topk_scores[0], 4),
+                                 topk_score_info=json.dumps(cur_score_info),
+                                 rank=ranks[idx],
+                                 correct=pred_idx == target[idx])
             pred_infos.append(pred_info)
 
         logger.info('Evaluation takes {} seconds'.format(round(time() - start_time, 3)))

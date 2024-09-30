@@ -83,6 +83,8 @@ parser.add_argument('--add-extra-batch', action='store_true',default=False,
 parser.add_argument('--extra-batch-limit', default=0, type=int,
                     help='-1 means unlimited upper limit of tail entity,'
                          'other number means number\'s extra batch size of add predict tail entity')
+parser.add_argument('--pretrained-ckpt', default=None, type=str,
+                    help='pretrained model checkpoint path')
 args = parser.parse_args()
 
 assert not args.train_path or os.path.exists(args.train_path)
