@@ -9,7 +9,7 @@ DIR="$( cd "$( dirname "$0" )" && cd .. && pwd )"
 echo "working directory: ${DIR}"
 
 if [ -z "$OUTPUT_DIR" ]; then
-  OUTPUT_DIR="${DIR}/checkpoint/${TASK}_bs128_extra_batch"
+  OUTPUT_DIR="${DIR}/checkpoint/${TASK}_bs128_no_extra_batch"
 fi
 if [ -z "$DATA_DIR" ]; then
   DATA_DIR="${DIR}/data/${TASK}"

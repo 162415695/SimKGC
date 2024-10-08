@@ -93,6 +93,7 @@ class CustomBertModel(nn.Module, ABC):
                 total_tail.append(vector)
             hr_vector, tail_vector = output_dict['hr_vector'], torch.cat(total_tail, dim=0)
         batch_size = hr_vector.size(0)
+
         labels = torch.arange(batch_size).to(hr_vector.device)
         logits = hr_vector.mm(tail_vector.t())
         if self.training:
@@ -108,7 +109,6 @@ class CustomBertModel(nn.Module, ABC):
             head_vector = output_dict['head_vector']
             self_neg_logits = torch.sum(hr_vector * head_vector, dim=1) * self.log_inv_t.exp()
             self_negative_mask = batch_dict['self_negative_mask']
-            self_negative_mask = self_negative_mask.bool()
             self_neg_logits.masked_fill_(~self_negative_mask, -1e4)
             logits = torch.cat([logits, self_neg_logits.unsqueeze(1)], dim=-1)
         return {'logits': logits,
