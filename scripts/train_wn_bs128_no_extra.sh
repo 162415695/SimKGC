@@ -9,7 +9,7 @@ DIR="$( cd "$( dirname "$0" )" && cd .. && pwd )"
 echo "working directory: ${DIR}"
 
 if [ -z "$OUTPUT_DIR" ]; then
-  OUTPUT_DIR="${DIR}/checkpoint/${TASK}_fix_triple_extra_batch"
+  OUTPUT_DIR="${DIR}/checkpoint/${TASK}_bs128_extra_batch"
 fi
 if [ -z "$DATA_DIR" ]; then
   DATA_DIR="${DIR}/data/${TASK}"
@@ -36,14 +36,12 @@ python3 -u main.py \
 --task ${TASK} \
 --neighbor-weight "${neighbor_weight}" \
 --rerank-n-hop "${rerank_n_hop}" \
---batch-size 1024 \
---print-freq 20 \
+--batch-size 128 \
+--print-freq 100 \
 --additive-margin 0.02 \
 --use-amp \
 --pre-batch 0 \
 --finetune-t \
 --epochs 50 \
 --workers 4 \
---max-to-keep 5 \
---add-extra-batch \
---extra-batch-limit 8 "$@"
+--max-to-keep 5  "$@"

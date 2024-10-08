@@ -10,6 +10,7 @@ import torch.utils.data
 import predict
 import tqdm
 from time import time
+from triplet_mask import construct_mask, construct_mask_extra_batch
 from typing import Dict
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 from transformers import AdamW
@@ -242,6 +243,8 @@ class Trainer:
                                                          mask=temp_data['tail_mask'],
                                                          token_type_ids=temp_data['tail_token_type_ids']
                                                          ))
+            if len(candidate_index) > 0:
+                batch_dict['triplet_mask'] = construct_mask_extra_batch([ex for ex in batch_dict['batch_data']].copy(),total_tail_id.copy() )
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
@@ -287,7 +290,6 @@ class Trainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
                 self.optimizer.step()
             self.scheduler.step()
-
             if i % self.args.print_freq == 0:
                 progress.display(i)
                 if self.extra_flag:

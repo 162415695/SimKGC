@@ -38,9 +38,37 @@ def construct_mask(row_exs: List, col_exs: List = None) -> torch.tensor:
             tail_id = col_exs[j].tail_id
             if tail_id in neighbor_ids:
                 triplet_mask[i][j] = False
-
     return triplet_mask
 
+
+def construct_mask_extra_batch(row_exs: List, col_id: List = None) -> torch.tensor:
+    positive_on_diagonal = True
+    num_row = len(row_exs)
+    col_id = row_exs if col_id is None else col_id
+    num_col = len(col_id)
+
+    # exact match
+    row_entity_ids = torch.LongTensor([entity_dict.entity_to_idx(ex.tail_id) for ex in row_exs])
+    col_entity_ids = row_entity_ids if positive_on_diagonal else \
+        torch.LongTensor([entity_dict.entity_to_idx(ex_id) for ex_id in col_id])
+    # num_row x num_col
+
+    triplet_mask =  torch.ones((num_row, num_col), dtype=torch.bool)
+    # mask out other possible neighbors
+    for i in range(num_row):
+        head_id, relation = row_exs[i].head_id, row_exs[i].relation
+        neighbor_ids = train_triplet_dict.get_neighbors(head_id, relation)
+        # exact match is enough, no further check needed
+        if len(neighbor_ids) <= 1:
+            continue
+
+        for j in range(num_col):
+            if i == j and positive_on_diagonal:
+                continue
+            tail_id = col_id[j]
+            if tail_id in neighbor_ids:
+                triplet_mask[i][j] = False
+    return triplet_mask
 
 def construct_self_negative_mask(exs: List) -> torch.tensor:
     mask = torch.ones(len(exs))

@@ -99,14 +99,11 @@ class CustomBertModel(nn.Module, ABC):
             logits -= torch.zeros(logits.size()).fill_diagonal_(self.add_margin).to(logits.device)
         logits *= self.log_inv_t.exp()
         triplet_mask = batch_dict.get('triplet_mask', None)
-
         if triplet_mask is not None:
-            triplet_mask = triplet_mask.bool()
-            logits[:, :len(triplet_mask[0])] = logits[:, :len(triplet_mask[0])].masked_fill(~triplet_mask, -1e4)
+            logits.masked_fill_(~triplet_mask, -1e4)
         if self.pre_batch > 0 and self.training:
             pre_batch_logits = self._compute_pre_batch_logits(hr_vector, tail_vector, batch_dict)
             logits = torch.cat([logits, pre_batch_logits], dim=-1)
-
         if self.args.use_self_negative and self.training:
             head_vector = output_dict['head_vector']
             self_neg_logits = torch.sum(hr_vector * head_vector, dim=1) * self.log_inv_t.exp()
