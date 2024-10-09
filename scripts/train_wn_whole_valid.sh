@@ -17,11 +17,11 @@ fi
 
 neighbor_weight=0.05
 rerank_n_hop=2
-if [ "${task}" = "WN18RR" ]; then
+if [ "${TASK}" = "WN18RR" ]; then
 # WordNet is a sparse graph, use more neighbors for re-rank
   rerank_n_hop=5
 fi
-if [ "${task}" = "wiki5m_ind" ]; then
+if [ "${TASK}" = "wiki5m_ind" ]; then
 # for inductive setting of wiki5m, test nodes never appear in the training set
   neighbor_weight=0.0
 fi
