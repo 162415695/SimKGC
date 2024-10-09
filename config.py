@@ -85,34 +85,36 @@ parser.add_argument('--extra-batch-limit', default=0, type=int,
                          'other number means number\'s extra batch size of add predict tail entity')
 parser.add_argument('--pretrained-ckpt', default=None, type=str,
                     help='pretrained model checkpoint path')
+parser.add_argument('--skip',default=False,action='store_true',
+                    help='skip parameter check,if you don\'t know this parameter do, don\'t modify it')
 args = parser.parse_args()
+if not args.skip:
+    assert not args.train_path or os.path.exists(args.train_path)
+    assert args.pooling in ['cls', 'mean', 'max']
+    assert args.task.lower() in ['wn18rr', 'fb15k237', 'wiki5m_ind', 'wiki5m_trans']
+    assert args.lr_scheduler in ['linear', 'cosine']
 
-assert not args.train_path or os.path.exists(args.train_path)
-assert args.pooling in ['cls', 'mean', 'max']
-assert args.task.lower() in ['wn18rr', 'fb15k237', 'wiki5m_ind', 'wiki5m_trans']
-assert args.lr_scheduler in ['linear', 'cosine']
+    if args.model_dir:
+        os.makedirs(args.model_dir, exist_ok=True)
+    else:
+        assert os.path.exists(args.eval_model_path), 'One of args.model_dir and args.eval_model_path should be valid path'
+        args.model_dir = os.path.dirname(args.eval_model_path)
 
-if args.model_dir:
-    os.makedirs(args.model_dir, exist_ok=True)
-else:
-    assert os.path.exists(args.eval_model_path), 'One of args.model_dir and args.eval_model_path should be valid path'
-    args.model_dir = os.path.dirname(args.eval_model_path)
+    if args.seed is not None:
+        torch.cuda.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        cudnn.deterministic = True
 
-if args.seed is not None:
-    torch.cuda.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    cudnn.deterministic = True
+    try:
+        if args.use_amp:
+            import torch.cuda.amp
+    except Exception:
+        args.use_amp = False
+        warnings.warn('AMP training is not available, set use_amp=False')
 
-try:
-    if args.use_amp:
-        import torch.cuda.amp
-except Exception:
-    args.use_amp = False
-    warnings.warn('AMP training is not available, set use_amp=False')
-
-if not torch.cuda.is_available():
-    args.use_amp = False
-    args.print_freq = 1
-    warnings.warn('GPU is not available, set use_amp=False and print_freq=1')
+    if not torch.cuda.is_available():
+        args.use_amp = False
+        args.print_freq = 1
+        warnings.warn('GPU is not available, set use_amp=False and print_freq=1')
