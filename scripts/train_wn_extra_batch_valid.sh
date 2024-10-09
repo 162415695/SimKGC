@@ -3,7 +3,7 @@
 set -x
 set -e
 
-TASK="WN18RR"
+TASK=WN18RR
 
 DIR="$( cd "$( dirname "$0" )" && cd .. && pwd )"
 echo "working directory: ${DIR}"
@@ -15,13 +15,14 @@ if [ -z "$DATA_DIR" ]; then
   DATA_DIR="${DIR}/data/${TASK}"
 fi
 
+
 neighbor_weight=0.05
-rerank_n_hop=2
-if [ "${task}" = "WN18RR" ]; then
+rerank_n_hop=4
+if [ "${TASK}" = "WN18RR" ]; then
 # WordNet is a sparse graph, use more neighbors for re-rank
   rerank_n_hop=5
 fi
-if [ "${task}" = "wiki5m_ind" ]; then
+if [ "${TASK}" = "wiki5m_ind" ]; then
 # for inductive setting of wiki5m, test nodes never appear in the training set
   neighbor_weight=0.0
 fi
@@ -43,6 +44,7 @@ python3 -u main.py \
 --pre-batch 0 \
 --finetune-t \
 --epochs 50 \
+--use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
 --add-extra-batch \

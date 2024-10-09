@@ -214,6 +214,7 @@ class Trainer:
             model = get_model_obj(self.model)
             candidate_index = generate_random_numbers(self.extra_batch_size, i, len(total_train_batch))
             self.model.eval()
+            total_head_id =[d.head_id for d in batch_dict['batch_data']]
             total_tail_id = [d.tail_id for d in batch_dict['batch_data']]
             tail_vector = []
             with torch.no_grad():
@@ -222,6 +223,8 @@ class Trainer:
                     temp_data = total_train_batch[temp_index].copy()
                     for f in range(len(temp_data['batch_data'])):
                         if temp_data['batch_data'][f].tail_id in total_tail_id:
+                            indices_to_remove.append(f)
+                        elif self.args.use_self_negative and temp_data['batch_data'][f].tail_id in total_head_id:
                             indices_to_remove.append(f)
                         else:
                             total_tail_id.append(temp_data['batch_data'][f].tail_id)
