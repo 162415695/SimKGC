@@ -320,9 +320,15 @@ class Trainer:
             if i % self.args.print_freq == 0:
                 progress.display(i)
                 if self.extra_flag:
+<<<<<<< HEAD
+                    if acc1 > 95:
+                        self.scheduler = self.reset_learning_rate(self.optimizer, self.train_steps)
+                        logger.info("acc1已超过95%,添加额外待预测的尾实体")
+=======
                     if acc1 > 90:
                         self.scheduler = self.reset_learning_rate(self.optimizer, self.train_steps)
                         logger.info("acc1已超过90%,添加额外待预测的尾实体")
+>>>>>>> parent of f36d561 (修改了acc阈值和epoch,避免模型欠拟合)
                         if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
                             self.extra_batch_size = 1
                             logger.info("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))

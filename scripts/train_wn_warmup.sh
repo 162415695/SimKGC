@@ -43,7 +43,11 @@ python3 -u main.py \
 --use-amp \
 --pre-batch 0 \
 --finetune-t \
+<<<<<<< HEAD
+--epochs 65 \
+=======
 --epochs 50 \
+>>>>>>> parent of f36d561 (修改了acc阈值和epoch,避免模型欠拟合)
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
