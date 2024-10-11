@@ -74,6 +74,7 @@ class Trainer:
         train_dataset = Dataset(path=args.train_path, task=args.task)
         valid_dataset = Dataset(path=args.valid_path, task=args.task) if args.valid_path else None
         num_training_steps = args.epochs * len(train_dataset) // max(args.batch_size, 1)
+        self.train_steps = num_training_steps
         args.warmup = min(args.warmup, num_training_steps // 10)
         logger.info('Total training steps: {}, warmup steps: {}'.format(num_training_steps, args.warmup))
         self.scheduler = self._create_lr_scheduler(num_training_steps)
@@ -199,6 +200,27 @@ class Trainer:
         logger.info('Epoch {}, valid metric: {}'.format(epoch, json.dumps(metric_dict)))
         return metric_dict
 
+    def reset_learning_rate(self, optimizer, total_steps):
+
+        # 重置优化器的学习率
+        new_lr = self.args.lr
+        warmup_steps = min(self.args.warmup, total_steps // 10)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = new_lr
+        if self.args.lr_scheduler == 'linear':
+            # 重新创建调度器
+            return get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=total_steps
+            )
+        elif self.args.lr_scheduler == 'cosine':
+            return get_cosine_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=total_steps
+            )
+
     def train_epoch(self, epoch):
 
         losses = AverageMeter('Loss', ':.4')
@@ -211,10 +233,11 @@ class Trainer:
             prefix="Epoch: [{}]".format(epoch))
         total_train_batch = {i: k for i, k in enumerate(self.train_loader)}
         for i, batch_dict in total_train_batch.items():
+            self.train_steps -= 1
             model = get_model_obj(self.model)
             candidate_index = generate_random_numbers(self.extra_batch_size, i, len(total_train_batch))
             self.model.eval()
-            total_head_id =[d.head_id for d in batch_dict['batch_data']]
+            total_head_id = [d.head_id for d in batch_dict['batch_data']]
             total_tail_id = [d.tail_id for d in batch_dict['batch_data']]
             tail_vector = []
             with torch.no_grad():
@@ -247,7 +270,8 @@ class Trainer:
                                                          token_type_ids=temp_data['tail_token_type_ids']
                                                          ))
             if len(candidate_index) > 0:
-                batch_dict['triplet_mask'] = construct_mask_extra_batch([ex for ex in batch_dict['batch_data']].copy(),total_tail_id.copy() )
+                batch_dict['triplet_mask'] = construct_mask_extra_batch([ex for ex in batch_dict['batch_data']].copy(),
+                                                                        total_tail_id.copy())
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
@@ -297,7 +321,7 @@ class Trainer:
                 progress.display(i)
                 if self.extra_flag:
                     if acc1 > 90:
-
+                        self.scheduler = self.reset_learning_rate(self.optimizer, self.train_steps)
                         logger.info("acc1已超过90%,添加额外待预测的尾实体")
                         if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
                             self.extra_batch_size = 1
