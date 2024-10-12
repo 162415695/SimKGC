@@ -43,7 +43,7 @@ python3 -u main.py \
 --use-amp \
 --pre-batch 0 \
 --finetune-t \
---epochs 65 \
+--epochs 50 \
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
