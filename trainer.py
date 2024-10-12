@@ -75,6 +75,7 @@ class Trainer:
         valid_dataset = Dataset(path=args.valid_path, task=args.task) if args.valid_path else None
         num_training_steps = args.epochs * len(train_dataset) // max(args.batch_size, 1)
         self.train_steps = num_training_steps
+        self.current_steps = 0
         args.warmup = min(args.warmup, num_training_steps // 10)
         logger.info('Total training steps: {}, warmup steps: {}'.format(num_training_steps, args.warmup))
         self.scheduler = self._create_lr_scheduler(num_training_steps)
@@ -105,17 +106,25 @@ class Trainer:
     def train_loop(self):
         if self.args.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
-
-        for epoch in range(self.args.epochs):
+        epoch = 0
+        while epoch < self.args.epochs:
             # train for one epoch
-            self.train_epoch(epoch)
-            self._run_eval(epoch=epoch)
+            extra_flag = self.train_epoch(epoch)
+            if extra_flag:
+                logger.info('已扩大batch,重新进行训练')
+                epoch = 0  # 重置为0重新开始
+            else:
+                epoch += 1  # 继续到下一个epoch
+                self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
 
     @torch.no_grad()
-    def _run_eval(self, epoch, step=0):
+    def _run_eval(self, epoch, step=0, extra_batch_num=0):
         filename = '{}/checkpoint_{}_{}.mdl'.format(self.args.model_dir, epoch, step)
         if step == 0:
             filename = '{}/checkpoint_epoch{}.mdl'.format(self.args.model_dir, epoch)
+        if step == 0:
+            filename = '{}/checkpoint_epoch{}_extra_batch{}.mdl'.format(self.args.model_dir, epoch, extra_batch_num)
+
         save_checkpoint({
             'epoch': epoch,
             'args': self.args.__dict__,
@@ -203,10 +212,17 @@ class Trainer:
     def reset_learning_rate(self, optimizer, total_steps):
 
         # 重置优化器的学习率
-        new_lr = self.scheduler.get_last_lr()[0]
+        if self.current_steps <= self.args.warmup:
+            new_lr = self.args.lr
+        else:
+            new_lr = self.scheduler.get_last_lr()[0]
+        self.current_steps = 0
+        self.args.lr = new_lr
+        logger.info(new_lr)
         warmup_steps = min(self.args.warmup, total_steps // 10)
         for param_group in optimizer.param_groups:
             param_group['lr'] = new_lr
+        optimizer.zero_grad()
         if self.args.lr_scheduler == 'linear':
             # 重新创建调度器
             return get_linear_schedule_with_warmup(
@@ -230,10 +246,10 @@ class Trainer:
         progress = ProgressMeter(
             len(self.train_loader),
             [losses, inv_t, top1, top3],
-            prefix="Epoch: [{}]".format(epoch))
+            prefix="Epoch: [{}],extra_batch:[{}]".format(epoch, self.extra_batch_size))
         total_train_batch = {i: k for i, k in enumerate(self.train_loader)}
         for i, batch_dict in total_train_batch.items():
-            self.train_steps -= 1
+            self.current_steps += 1
             model = get_model_obj(self.model)
             candidate_index = generate_random_numbers(self.extra_batch_size, i, len(total_train_batch))
             self.model.eval()
@@ -327,16 +343,19 @@ class Trainer:
                         if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
                             self.extra_batch_size = 1
                             logger.info("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
+                            return True
                         else:
                             if self.extra_batch_size < self.extra_batch_limit:
                                 self.extra_batch_size *= 2
                                 if self.extra_batch_size > self.extra_batch_limit:
                                     self.extra_batch_size = self.extra_batch_limit
                                 logger.info("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
+                                return True
                             else:
                                 logger.info("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
                                 self.extra_flag = False
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
+        return False
 
     def _setup_training(self):
         if torch.cuda.device_count() > 1:
