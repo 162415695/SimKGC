@@ -92,10 +92,10 @@ class LinkGraph:
             self.graph[tail_id].add(head_id)
         logger.info('Done build link graph with {} nodes'.format(len(self.graph)))
 
-    def get_neighbor_ids(self, entity_id: str) -> List[str]:
+    def get_neighbor_ids(self, entity_id: str, max_to_keep=10) -> List[str]:
         # make sure different calls return the same results
         neighbor_ids = self.graph.get(entity_id, set())
-        return sorted(list(neighbor_ids))
+        return sorted(list(neighbor_ids))[:max_to_keep]
 
     def get_n_hop_entity_indices(self, entity_id: str,
                                  entity_dict: EntityDict,

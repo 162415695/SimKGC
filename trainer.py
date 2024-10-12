@@ -203,7 +203,7 @@ class Trainer:
     def reset_learning_rate(self, optimizer, total_steps):
 
         # 重置优化器的学习率
-        new_lr = self.args.lr
+        new_lr = self.scheduler.get_last_lr()[0]
         warmup_steps = min(self.args.warmup, total_steps // 10)
         for param_group in optimizer.param_groups:
             param_group['lr'] = new_lr
@@ -320,9 +320,9 @@ class Trainer:
             if i % self.args.print_freq == 0:
                 progress.display(i)
                 if self.extra_flag:
-                    if acc1 > 95:
+                    if acc1 > 90:
                         self.scheduler = self.reset_learning_rate(self.optimizer, self.train_steps)
-                        logger.info("acc1已超过95%,添加额外待预测的尾实体")
+                        logger.info("acc1已超过90%,添加额外待预测的尾实体")
 
                         if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
                             self.extra_batch_size = 1
