@@ -30,7 +30,7 @@ python3 -u main.py \
 --model-dir "${OUTPUT_DIR}" \
 --pretrained-model /mnt/data/yhy/model/bert-base-uncased \
 --pooling mean \
---lr 5e-5 \
+--lr 1e-4 \
 --use-link-graph \
 --train-path "${DATA_DIR}/train.txt.json" \
 --valid-path "${DATA_DIR}/valid.txt.json" \

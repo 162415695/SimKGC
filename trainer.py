@@ -209,9 +209,8 @@ class Trainer:
         logger.info('Epoch {}, valid metric: {}'.format(epoch, json.dumps(metric_dict)))
         return metric_dict
 
-    def reset_learning_rate(self, optimizer, total_steps):
-
-        # 重置优化器的学习率
+    def reset_learning_rate(self,  total_steps):
+    # 重置优化器的学习率
         if self.current_steps <= self.args.warmup:
             new_lr = self.args.lr
         else:
@@ -219,20 +218,20 @@ class Trainer:
         self.current_steps = 0
         self.args.lr = new_lr
         logger.info(new_lr)
+        self.optimizer = AdamW([p for p in self.model.parameters() if p.requires_grad],
+                               lr=new_lr,
+                               weight_decay=self.args.weight_decay)
         warmup_steps = min(self.args.warmup, total_steps // 10)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = new_lr
-        optimizer.zero_grad()
         if self.args.lr_scheduler == 'linear':
             # 重新创建调度器
-            return get_linear_schedule_with_warmup(
-                optimizer,
+            self.scheduler = get_linear_schedule_with_warmup(
+                self.optimizer,
                 num_warmup_steps=warmup_steps,
                 num_training_steps=total_steps
             )
         elif self.args.lr_scheduler == 'cosine':
-            return get_cosine_schedule_with_warmup(
-                optimizer,
+            self.scheduler =  get_cosine_schedule_with_warmup(
+                self.optimizer,
                 num_warmup_steps=warmup_steps,
                 num_training_steps=total_steps
             )
@@ -337,12 +336,12 @@ class Trainer:
                 progress.display(i)
                 if self.extra_flag:
                     if acc1 > 90:
-                        self.scheduler = self.reset_learning_rate(self.optimizer, self.train_steps)
                         logger.info("acc1已超过90%,添加额外待预测的尾实体")
 
                         if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
                             self.extra_batch_size = 1
                             logger.info("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
+                            self.reset_learning_rate(self.train_steps)
                             return True
                         else:
                             if self.extra_batch_size < self.extra_batch_limit:
@@ -350,6 +349,7 @@ class Trainer:
                                 if self.extra_batch_size > self.extra_batch_limit:
                                     self.extra_batch_size = self.extra_batch_limit
                                 logger.info("尾实体添加成功,当前额外batch数量为" + str(self.extra_batch_size))
+                                self.reset_learning_rate(self.train_steps)
                                 return True
                             else:
                                 logger.info("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
