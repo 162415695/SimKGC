@@ -5,7 +5,7 @@ import torch.backends.cudnn as cudnn
 from config import args
 from trainer import Trainer
 from logger_config import logger
-from hop_graph import graph_build,get_n_hop_node
+from hop_graph import graph_build
 
 def main():
     ngpus_per_node = torch.cuda.device_count()
