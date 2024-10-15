@@ -6,6 +6,7 @@ import shutil
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.data
 import predict
 import tqdm
@@ -38,6 +39,21 @@ def model_load(ckt_path):
         new_state_dict[k] = v
     return new_state_dict
 
+class SigmoidBCELoss(nn.Module):
+    """Sigmoid Binary Cross Entropy
+    """
+
+    def __init__(self, weight=1.0, reduction='mean'):
+        super(SigmoidBCELoss, self).__init__()
+        self.weight = weight
+        self.reduction = reduction
+        self.m = nn.Sigmoid()
+        self.loss = nn.BCELoss(weight=torch.tensor([self.weight]), reduction=self.reduction)
+
+    def forward(self, logits, labels):
+        one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
+        output = self.loss(self.m(logits), one_hot_labels)
+        return output
 
 class Trainer:
 
@@ -64,7 +80,9 @@ class Trainer:
         self.extra_batch_size = 0
         self.extra_flag = self.args.add_extra_batch
         # define loss function (criterion) and optimizer
-        self.criterion = nn.CrossEntropyLoss().cuda()
+        self.criterion = nn.CrossEntropyLoss(reduction='mean').cuda()
+        # self.criterion2 = SigmoidBCELoss(reduction='mean').cuda()
+        self.criterion2 = nn.BCEWithLogitsLoss(reduction='mean').cuda()
 
         self.optimizer = AdamW([p for p in self.model.parameters() if p.requires_grad],
                                lr=args.lr,
@@ -133,7 +151,7 @@ class Trainer:
         delete_old_ckt(path_pattern='{}/checkpoint_*.mdl'.format(self.args.model_dir),
                        keep=self.args.max_to_keep)
         # metric_dict = self.eval_epoch(filename)
-        metric_dict = self.eval_entity(filename)
+        metric_dict = self.eval_entity(epoch)
         is_best = self.best_metric is None or (metric_dict['hit@1'] > self.best_metric['hit@1'])
         if is_best:
             self.best_metric = metric_dict
@@ -306,10 +324,16 @@ class Trainer:
             logits, labels = outputs.logits, outputs.labels
             assert logits.size(0) == batch_size
             # head + relation -> tail
-            loss = self.criterion(logits, labels)
+            # loss = self.criterion(logits, labels)
+            forward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
+            loss1 = self.criterion(logits, labels)
+            loss2 = self.criterion2(logits, forward_one_hot_labels)
             # tail -> head + relation
-
-            loss += self.criterion(logits[:, :batch_size].t(), labels)
+            backward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[0]).float()
+            loss3 = self.criterion(logits[:, :batch_size].t(), labels)
+            loss4 = self.criterion2(logits[:, :batch_size].t(), backward_one_hot_labels)
+            # loss += self.criterion(logits[:, :batch_size].t(), labels)
+            loss = loss1+loss2+loss3+loss4
 
             acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
 
@@ -438,22 +462,5 @@ class Trainer:
                                                                     batch_size=batch_size)
         eval_dir = 'forward' if eval_forward else 'backward'
         logger.info('{} metrics: {}'.format(eval_dir, json.dumps(metrics)))
-
-        pred_infos = []
-        for idx, ex in enumerate(examples):
-            cur_topk_scores = topk_scores[idx]
-            cur_topk_indices = topk_indices[idx]
-            pred_idx = cur_topk_indices[0]
-            cur_score_info = {entity_dict.get_entity_by_idx(topk_idx).entity: round(topk_score, 3)
-                              for topk_score, topk_idx in zip(cur_topk_scores, cur_topk_indices)}
-
-            pred_info = PredInfo(head=ex.head, relation=ex.relation,
-                                 tail=ex.tail, pred_tail=entity_dict.get_entity_by_idx(pred_idx).entity,
-                                 pred_score=round(cur_topk_scores[0], 4),
-                                 topk_score_info=json.dumps(cur_score_info),
-                                 rank=ranks[idx],
-                                 correct=pred_idx == target[idx])
-            pred_infos.append(pred_info)
-
         logger.info('Evaluation takes {} seconds'.format(round(time() - start_time, 3)))
         return metrics
