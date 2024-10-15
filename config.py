@@ -87,6 +87,10 @@ parser.add_argument('--pretrained-ckpt', default=None, type=str,
                     help='pretrained model checkpoint path')
 parser.add_argument('--skip',default=False,action='store_true',
                     help='skip parameter check,if you don\'t know this parameter do, don\'t modify it')
+parser.add_argument('--random-hop-mask', default=False, action='store_true',
+                    help='random hop data logit mask')
+parser.add_argument('--use-special-loss', default=False, action='store_true',
+                    help='random extra loss function')
 args = parser.parse_args()
 if not args.skip:
     assert not args.train_path or os.path.exists(args.train_path)

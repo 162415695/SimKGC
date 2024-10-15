@@ -325,18 +325,21 @@ class Trainer:
             assert logits.size(0) == batch_size
             # head + relation -> tail
             # loss = self.criterion(logits, labels)
-            forward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
-            loss1 = self.criterion(logits, labels)
-            loss2 = self.criterion2(logits, forward_one_hot_labels)
-            # tail -> head + relation
-            backward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[0]).float()
-            loss3 = self.criterion(logits[:, :batch_size].t(), labels)
-            loss4 = self.criterion2(logits[:, :batch_size].t(), backward_one_hot_labels)
-            # loss += self.criterion(logits[:, :batch_size].t(), labels)
-            loss = loss1+loss2+loss3+loss4
-
+            if self.args.use_special_loss:
+                forward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
+                backward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[0]).float()
+                loss1 = self.criterion(logits, labels)
+                loss2 = self.criterion2(logits, forward_one_hot_labels)
+                # tail -> head + relation
+                loss3 = self.criterion(logits[:, :batch_size].t(), labels)
+                loss4 = self.criterion2(logits[:, :batch_size].t(), backward_one_hot_labels)
+                # loss += self.criterion(logits[:, :batch_size].t(), labels)
+                loss = loss1+loss2+loss3+loss4
+            else:
+                loss1 = self.criterion(logits, labels)
+                loss3 = self.criterion(logits[:, :batch_size].t(), labels)
+                loss = loss1 + loss3
             acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
-
             top1.update(acc1.item(), batch_size)
             top3.update(acc3.item(), batch_size)
 
