@@ -47,4 +47,6 @@ python3 -u main.py \
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
---random-hop-mask "$@"
+--random-hop-mask \
+--add-extra-batch \
+--extra-batch-limit 8 "$@"

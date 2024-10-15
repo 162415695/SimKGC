@@ -5,6 +5,7 @@ import multiprocessing as mp
 
 from multiprocessing import Pool
 from typing import List
+from hop_graph import graph_build
 
 parser = argparse.ArgumentParser(description='preprocess')
 parser.add_argument('--task', default='wn18rr', type=str, metavar='N',
@@ -319,6 +320,8 @@ def main():
                       out_path='{}/entities.json'.format(os.path.dirname(args.train_path)),
                       id2text=id2text)
     print('Done')
+    graph_build()
+    print('多条图谱构建完成')
 
 
 if __name__ == '__main__':

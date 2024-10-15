@@ -7,7 +7,6 @@ from dict_hub import get_train_triplet_dict, get_entity_dict, EntityDict, Triple
 from logger_config import logger
 entity_dict: EntityDict = get_entity_dict()
 train_triplet_dict: TripletDict = get_train_triplet_dict() if not args.is_test else None
-n_hop_graph={}
 
 def construct_mask(row_exs: List, col_exs: List = None) -> torch.tensor:
     positive_on_diagonal = col_exs is None
@@ -73,19 +72,8 @@ def construct_mask_extra_batch(row_exs: List, col_id: List = None) -> torch.tens
 
 def construct_n_hop_mask(total_head_id,total_tail_id,n_hop) -> torch.tensor:
     triplet_mask =  torch.ones((len(total_head_id), len(total_tail_id)), dtype=torch.bool)
-    global n_hop_graph
     for row_index, head_id in enumerate(total_head_id):
-        if head_id in n_hop_graph:
-            if n_hop in n_hop_graph[head_id]:
-                tail_id_set = n_hop_graph[head_id][n_hop]
-            else:
-                tail_id_set = set(get_n_hop_node(head_id, n_hop))
-                n_hop_graph[head_id][n_hop] = tail_id_set
-        else:
-            tail_id_set = set(get_n_hop_node(head_id, n_hop))
-            n_hop_graph[head_id]={}
-            n_hop_graph[head_id][n_hop] = tail_id_set
-        # 添加当前行的 tail_id
+        tail_id_set = set(get_n_hop_node(head_id, n_hop))
         tail_id_set.add(total_tail_id[row_index])
         for col_index, tail_id in enumerate(total_tail_id):
             triplet_mask[row_index][col_index] = tail_id in tail_id_set

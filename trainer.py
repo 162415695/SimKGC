@@ -4,6 +4,7 @@ import json
 import torch
 import shutil
 import numpy as np
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,7 +12,7 @@ import torch.utils.data
 import predict
 import tqdm
 from time import time
-from triplet_mask import construct_mask, construct_mask_extra_batch
+from triplet_mask import construct_mask, construct_mask_extra_batch,construct_n_hop_mask
 from typing import Dict
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 from transformers import AdamW
@@ -305,6 +306,17 @@ class Trainer:
             if len(candidate_index) > 0:
                 batch_dict['triplet_mask'] = construct_mask_extra_batch([ex for ex in batch_dict['batch_data']].copy(),
                                                                         total_tail_id.copy())
+            if self.args.random_hop_mask:
+
+                random_number = random.randint(-4, 10)
+                if random_number <= 0:
+                    pass
+                else:
+                    logger.info(str(random_number)+'跳')
+                    logger.info(batch_dict['triplet_mask'])
+                    temp_mask = construct_n_hop_mask(total_head_id, total_tail_id, n_hop=random_number)
+                    batch_dict['triplet_mask'] = batch_dict['triplet_mask'] & temp_mask
+                    logger.info(batch_dict['triplet_mask'])
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
@@ -326,8 +338,14 @@ class Trainer:
             # head + relation -> tail
             # loss = self.criterion(logits, labels)
             if self.args.use_special_loss:
+                logger.info(labels)
+                logger.info(labels.shape)
                 forward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
+                logger.info(forward_one_hot_labels)
+                logger.info(forward_one_hot_labels.shape)
                 backward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[0]).float()
+                logger.info(backward_one_hot_labels)
+                logger.info(backward_one_hot_labels.shape)
                 loss1 = self.criterion(logits, labels)
                 loss2 = self.criterion2(logits, forward_one_hot_labels)
                 # tail -> head + relation
