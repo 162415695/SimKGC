@@ -40,6 +40,42 @@ def model_load(ckt_path):
         new_state_dict[k] = v
     return new_state_dict
 
+
+"""Sparsemax activation function.
+Pytorch implementation of Sparsemax function from:
+-- "From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification"
+-- André F. T. Martins, Ramón Fernandez Astudillo (http://arxiv.org/abs/1602.02068)
+"""
+
+import torch
+import torch.nn as nn
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+class TopKSoftmax(nn.Module):
+    def __init__(self, k=10, dim=-1):
+        super(TopKSoftmax, self).__init__()
+        self.k = k
+        self.dim = dim
+
+    def forward(self, logits):
+        # 获取前K大的值及其索引
+        topk_vals, topk_indices = torch.topk(logits, self.k, dim=self.dim)
+
+        # 对前K大的值做Softmax
+        topk_softmax = F.softmax(topk_vals, dim=self.dim)
+
+        # 构建与logits形状相同的全0矩阵
+        softmax_output = torch.zeros_like(logits)
+
+        # 将Softmax后的值放回相应位置
+        softmax_output.scatter_(self.dim, topk_indices, topk_softmax)
+
+        return softmax_output
+
+
+
 class SigmoidBCELoss(nn.Module):
     """Sigmoid Binary Cross Entropy
     """
@@ -55,6 +91,28 @@ class SigmoidBCELoss(nn.Module):
         one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
         output = self.loss(self.m(logits), one_hot_labels)
         return output
+
+
+class SparsemaxBCELoss(nn.Module):
+    """Sparsemax Binary Cross Entropy Loss"""
+
+    def __init__(self, weight=50, reduction='mean'):
+        super(SparsemaxBCELoss, self).__init__()
+        self.weight = weight
+        self.reduction = reduction
+        self.topksoft = TopKSoftmax()
+        self.loss_fn = nn.BCELoss(weight=torch.tensor([self.weight]), reduction=self.reduction)
+
+    def forward(self, logits, labels):
+        # Apply Sparsemax activation
+        probs = self.topksoft(logits)
+
+        # Convert labels to one-hot encoding
+        one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
+
+        # Compute BCE loss
+        loss = self.loss_fn(probs, one_hot_labels)
+        return loss
 
 class Trainer:
 
@@ -81,7 +139,7 @@ class Trainer:
         self.extra_batch_size = 0
         self.extra_flag = self.args.add_extra_batch
         # define loss function (criterion) and optimizer
-        self.criterion = nn.CrossEntropyLoss(reduction='mean').cuda()
+        self.criterion =SparsemaxBCELoss().cuda()
         # self.criterion2 = SigmoidBCELoss(reduction='mean').cuda()
         self.criterion2 = nn.BCEWithLogitsLoss(reduction='mean').cuda()
 
@@ -261,10 +319,14 @@ class Trainer:
         top1 = AverageMeter('Acc@1', ':6.2f')
         top3 = AverageMeter('Acc@3', ':6.2f')
         inv_t = AverageMeter('InvT', ':6.2f')
+        if self.extra_flag:
+            prefix = "Epoch: [{}],extra_batch:[{}]".format(epoch, self.extra_batch_size)
+        else:
+            prefix = "Epoch: [{}]".format(epoch)
         progress = ProgressMeter(
             len(self.train_loader),
             [losses, inv_t, top1, top3],
-            prefix="Epoch: [{}],extra_batch:[{}]".format(epoch, self.extra_batch_size))
+            prefix=prefix)
         total_train_batch = {i: k for i, k in enumerate(self.train_loader)}
         for i, batch_dict in total_train_batch.items():
             self.current_steps += 1
@@ -338,21 +400,16 @@ class Trainer:
             # head + relation -> tail
             # loss = self.criterion(logits, labels)
             if self.args.use_special_loss:
-                logger.info(labels)
-                logger.info(labels.shape)
                 forward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
-                logger.info(forward_one_hot_labels)
-                logger.info(forward_one_hot_labels.shape)
                 backward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[0]).float()
-                logger.info(backward_one_hot_labels)
-                logger.info(backward_one_hot_labels.shape)
                 loss1 = self.criterion(logits, labels)
                 loss2 = self.criterion2(logits, forward_one_hot_labels)
                 # tail -> head + relation
                 loss3 = self.criterion(logits[:, :batch_size].t(), labels)
                 loss4 = self.criterion2(logits[:, :batch_size].t(), backward_one_hot_labels)
                 # loss += self.criterion(logits[:, :batch_size].t(), labels)
-                loss = loss1+loss2+loss3+loss4
+#                loss = loss1+loss2+loss3+loss4
+                loss = loss1 + loss3
             else:
                 loss1 = self.criterion(logits, labels)
                 loss3 = self.criterion(logits[:, :batch_size].t(), labels)
