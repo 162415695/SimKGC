@@ -5,6 +5,7 @@ import argparse
 import warnings
 import numpy as np
 import torch.backends.cudnn as cudnn
+import shutil
 
 parser = argparse.ArgumentParser(description='SimKGC arguments')
 parser.add_argument('--pretrained-model', default='bert-base-uncased', type=str, metavar='N',
@@ -100,6 +101,12 @@ if not args.skip:
 
     if args.model_dir:
         os.makedirs(args.model_dir, exist_ok=True)
+        this_dir = os.path.dirname(__file__)
+        src_trainer_fpath = os.path.join(os.path.dirname(__file__), 'trainer.py')
+        des_trainer_fpath = os.path.join(args.model_dir, 'trainer.py')
+        if os.path.exists(des_trainer_fpath):
+            os.remove(des_trainer_fpath)
+        shutil.copyfile(src_trainer_fpath, des_trainer_fpath)
     else:
         assert os.path.exists(args.eval_model_path), 'One of args.model_dir and args.eval_model_path should be valid path'
         args.model_dir = os.path.dirname(args.eval_model_path)
