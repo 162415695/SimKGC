@@ -30,7 +30,9 @@ def _custom_tokenize(text: str,
                                add_special_tokens=True,
                                max_length=args.max_num_tokens,
                                return_token_type_ids=True,
-                               truncation=True)
+                               truncation=True,
+                               padding='max_length'
+                               )
     return encoded_inputs
 
 
@@ -106,12 +108,15 @@ class Example:
         tail_word = _parse_entity_name(self.tail)
         tail_encoded_inputs = _custom_tokenize(text=_concat_name_desc(tail_word, tail_desc))
 
+        rel_encoded_inputs=_custom_tokenize(self.relation)
         return {'hr_token_ids': hr_encoded_inputs['input_ids'],
                 'hr_token_type_ids': hr_encoded_inputs['token_type_ids'],
                 'tail_token_ids': tail_encoded_inputs['input_ids'],
                 'tail_token_type_ids': tail_encoded_inputs['token_type_ids'],
                 'head_token_ids': head_encoded_inputs['input_ids'],
                 'head_token_type_ids': head_encoded_inputs['token_type_ids'],
+                'rel_token_ids': rel_encoded_inputs['input_ids'],
+                'rel_token_type_ids': rel_encoded_inputs['token_type_ids'],
                 'obj': self}
 
 
@@ -182,7 +187,14 @@ def collate(batch_data: List[dict]) -> dict:
     head_token_type_ids = to_indices_and_mask(
         [torch.LongTensor(ex['head_token_type_ids']) for ex in batch_data],
         need_mask=False)
-
+    rel_token_ids,rel_mask = to_indices_and_mask(
+        [torch.LongTensor(ex['rel_token_ids']) for ex in batch_data],
+        pad_token_id=get_tokenizer().pad_token_id
+    )
+    rel_token_type_ids = to_indices_and_mask(
+        [torch.LongTensor(ex['rel_token_type_ids']) for ex in batch_data],
+        need_mask=False
+    )
     batch_exs = [ex['obj'] for ex in batch_data]
     batch_dict = {
         'hr_token_ids': hr_token_ids,
@@ -194,6 +206,9 @@ def collate(batch_data: List[dict]) -> dict:
         'head_token_ids': head_token_ids,
         'head_mask': head_mask,
         'head_token_type_ids': head_token_type_ids,
+        'rel_token_ids': rel_token_ids,
+        'rel_token_type_ids': rel_token_type_ids,
+        'rel_mask': rel_mask,
         'batch_data': batch_exs,
         'triplet_mask': construct_mask(row_exs=batch_exs) if not args.is_test else None,
         'self_negative_mask': construct_self_negative_mask(batch_exs) if not args.is_test else None,

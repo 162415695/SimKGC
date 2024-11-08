@@ -9,6 +9,7 @@ from collections import OrderedDict
 
 from doc import collate, Example, Dataset
 from config import args
+
 from models import build_model
 from utils import AttrDict, move_to_cuda
 from dict_hub import build_tokenizer
@@ -61,15 +62,15 @@ class BertPredictor:
     @torch.no_grad()
     def predict_by_examples(self, examples: List[Example]):
         data_loader = torch.utils.data.DataLoader(
-            Dataset(path='', examples=examples, task=args.task),
+            Dataset(path='', examples=examples, task=self.args.task),
             num_workers=1,
-            batch_size=max(args.batch_size, 512),
+            batch_size=1,
             collate_fn=collate,
             shuffle=False)
 
         hr_tensor_list, tail_tensor_list = [], []
         for idx, batch_dict in enumerate(data_loader):
-            if self.use_cuda:
+            if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
             hr_tensor_list.append(outputs['hr_vector'])
@@ -77,6 +78,50 @@ class BertPredictor:
 
         return torch.cat(hr_tensor_list, dim=0), torch.cat(tail_tensor_list, dim=0)
 
+    @torch.no_grad()
+    def predict_by_examples_new(self,entity_dict,valid_examples):
+        entity_exs=entity_dict.entity_exs
+        examples = []
+        for entity_ex in entity_exs:
+            examples.append(Example(head_id='', relation='',
+                                    tail_id=entity_ex.entity_id))
+        data_loader = torch.utils.data.DataLoader(
+            Dataset(path='', examples=examples, task=args.task),
+            num_workers=2,
+            batch_size=max(args.batch_size, 1024),
+            collate_fn=collate,
+            shuffle=False)
+
+        ent_tensor_list, ent_tensor_list_mask = [], []
+        for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
+            batch_dict['only_ent_embedding'] = True
+            if torch.cuda.is_available():
+                batch_dict = move_to_cuda(batch_dict)
+            outputs = self.model(**batch_dict)
+            ent_tensor_list.append(outputs['ent_vectors'])
+            ent_tensor_list_mask.append(outputs['tail_mask'])
+
+        self.model.module.total_tail = torch.cat(ent_tensor_list, dim=0).cpu()
+        self.model.module.total_tail_mask = torch.cat(ent_tensor_list_mask, dim=0).cpu()
+        del ent_tensor_list, ent_tensor_list_mask
+        torch.cuda.empty_cache()
+
+        # get valid examples encode with cross attention
+        data_loader = torch.utils.data.DataLoader(
+            Dataset(path='', examples=valid_examples, task=self.args.task),
+            num_workers=1,
+            batch_size=len(valid_examples),
+            collate_fn=collate,
+            shuffle=False)
+
+        hr_tensor_list = []
+        for idx, batch_dict in enumerate(data_loader):
+            if torch.cuda.is_available():
+                batch_dict = move_to_cuda(batch_dict)
+            outputs = self.model.module.eval_forward(**batch_dict)
+            hr_tensor_list.append(outputs['hr_vector'])
+            torch.cuda.empty_cache()
+        return torch.cat(hr_tensor_list, dim=0)
     @torch.no_grad()
     def predict_by_entities(self, entity_exs) -> torch.tensor:
         examples = []
@@ -93,6 +138,7 @@ class BertPredictor:
         ent_tensor_list = []
         for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
             batch_dict['only_ent_embedding'] = True
+            batch_dict['return_direct'] = True
             if self.use_cuda:
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)

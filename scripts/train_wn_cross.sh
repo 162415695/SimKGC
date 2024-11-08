@@ -9,7 +9,7 @@ DIR="$( cd "$( dirname "$0" )" && cd .. && pwd )"
 echo "working directory: ${DIR}"
 
 if [ -z "$OUTPUT_DIR" ]; then
-  OUTPUT_DIR="${DIR}/checkpoint/${TASK}_loss_pretrain_new"
+  OUTPUT_DIR="${DIR}/checkpoint/${TASK}_trans"
 fi
 if [ -z "$DATA_DIR" ]; then
   DATA_DIR="${DIR}/data/${TASK}"
@@ -29,24 +29,22 @@ fi
 python3 -u main.py \
 --model-dir "${OUTPUT_DIR}" \
 --pretrained-model /mnt/data/yhy/model/bert-base-uncased \
---pooling mean \
---lr 2e-5 \
+--pooling cls \
+--lr 1e-4 \
 --use-link-graph \
 --train-path "${DATA_DIR}/train.txt.json" \
 --valid-path "${DATA_DIR}/valid.txt.json" \
 --task ${TASK} \
 --neighbor-weight "${neighbor_weight}" \
 --rerank-n-hop "${rerank_n_hop}" \
---batch-size 1024 \
+--batch-size 512 \
 --print-freq 20 \
 --additive-margin 0.02 \
 --use-amp \
 --pre-batch 0 \
 --finetune-t \
---epochs 20 \
+--epochs 50 \
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
---warmup 0 \
---pretrained-ckpt /mnt/data/yhy/projects/SimKGC/checkpoint/WN18RR_bert_base_best/model_last.mdl \
---use-special-loss "$@"
+--use-cross-attention  "$@"

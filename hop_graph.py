@@ -2,59 +2,59 @@ from igraph import Graph
 from config import args
 from logger_config import logger
 import json
+from dict_hub import get_entity_dict, get_link_graph, get_tokenizer
 import pickle
 import os
-from py2neo import Node,Relationship,Graph,Path,Subgraph
+entity_dict = get_entity_dict()
+hop_graph = None
+name_to_index=None
+index_to_name=None
 
-
-class Neo4jExample:
-
-    def __init__(self, uri, user, password):
-        self.graph = Graph(uri, auth=(user, password))
-
-    def add_node(self, node_name):
-        # 检查节点是否已存在
-        if not self.graph.nodes.match("Node", name=node_name).first():
-            node = Node("Node", name=node_name)
-            self.graph.create(node)
-
-    def add_edge(self, node1_name, node2_name):
-        node1 = self.graph.nodes.match("Node", name=node1_name).first()
-        node2 = self.graph.nodes.match("Node", name=node2_name).first()
-        if node1 and node2:
-            # 检查关系是否已存在（双向检查）
-            if not (self.graph.relationships.match((node1, node2), "RELATED").first() or
-                    self.graph.relationships.match((node2, node1), "RELATED").first()):
-                relationship1 = Relationship(node1, "RELATED", node2)
-                relationship2 = Relationship(node2, "RELATED", node1)
-                self.graph.create(relationship1)
-                self.graph.create(relationship2)
-
-    def find_n_hop_neighbors(self, node_name, n):
-        query = (
-            f"MATCH (start:Node {{name: $node_name}})-[:RELATED*1..{n}]->(neighbor) "
-            "RETURN DISTINCT neighbor.name AS name"
-        )
-        result = self.graph.run(query, node_name=node_name)
-        return [record["name"] for record in result]
-
-
-uri = 'bolt://10.10.2.106:7687'
-user = "neo4j"
-password = "04686763537"
-neo4j_example = Neo4jExample(uri, user, password)
-
+# 使用 Python 的 pickle 模块
 def graph_build():
-    global neo4j_example
-    # 定义三元组列表 (source, target, weight)，节点为字符串
-    examples = json.load(open(args.train_path, 'r', encoding='utf-8'))
-    for ex in examples:
-        head_id, tail_id = ex['head_id'], ex['tail_id']
-        neo4j_example.add_node(head_id)
-        neo4j_example.add_node(tail_id)
-        neo4j_example.add_edge(head_id, tail_id)
+    file_name = '{}/igraph.pkl'.format(os.path.dirname(args.train_path))
+    global hop_graph
+    global name_to_index
+    global index_to_name
+    if os.path.exists(file_name):
+        logger.info('Loading graph from {}'.format(file_name))
+        with open(file_name, "rb") as f:
+            hop_graph = pickle.load(f)
+        logger.info('Loaded graph from {}'.format(file_name))
+        name_to_index = {name: idx for idx, name in enumerate(hop_graph.vs["name"])}
+        index_to_name = {idx:name for idx, name in enumerate(hop_graph.vs["name"])}
+        return
+    else:
+        logger.info("构建多跳子图")
+        hop_graph = Graph(directed=False)
+        nodes = set()
+        # 定义三元组列表 (source, target, weight)，节点为字符串
+        examples = json.load(open(args.train_path, 'r', encoding='utf-8'))
+        for ex in examples:
+            head_id, tail_id = ex['head_id'], ex['tail_id']
+            nodes.update([head_id, tail_id])
+        hop_graph.add_vertices(list(nodes))
+        logger.info("节点添加完成")
+        # 添加边和权重
+        for ex in examples:
+            head_id, tail_id = ex['head_id'], ex['tail_id']
+            hop_graph.add_edge(head_id, tail_id)
+        logger.info("边添加完成")
+        with open(file_name, "wb") as f:
+            pickle.dump(hop_graph, f)
+        name_to_index = {name: idx for idx, name in enumerate(hop_graph.vs["name"])}
+        index_to_name = {idx: name for idx, name in enumerate(hop_graph.vs["name"])}
 
 
 def get_n_hop_node(node_id, n_hop=0):
-    n_hop_neighbors = neo4j_example.find_n_hop_neighbors(node_id, n_hop)
-    return n_hop_neighbors
+    global hop_graph
+    if n_hop == 0:
+        return []
+    node_index = name_to_index.get(node_id)
+    hops = n_hop  # 跳数
+    try:
+        neighborhood = hop_graph.neighborhood(vertices=node_index, order=hops)
+        neighborhood_names = [index_to_name[index] for index in neighborhood]
+    except:
+        neighborhood_names = []
+    return neighborhood_names

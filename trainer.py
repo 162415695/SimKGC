@@ -18,7 +18,7 @@ from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_wi
 from transformers import AdamW
 from copy import deepcopy
 from typing import List, Tuple
-from evaluate import entity_dict, compute_metrics, PredInfo
+from evaluate import entity_dict, compute_metrics, PredInfo, _setup_entity_dict
 from doc import Dataset, collate, _convert_is_test_2_true, _convert_is_test_2_false, load_data, Example
 from utils import AverageMeter, ProgressMeter
 from utils import save_checkpoint, delete_old_ckt, report_num_trainable_parameters, move_to_cuda, get_model_obj, \
@@ -29,6 +29,7 @@ from dict_hub import build_tokenizer
 from logger_config import logger
 from collections import OrderedDict
 
+entity_dict = _setup_entity_dict()
 
 def model_load(ckt_path):
     ckt_dict = torch.load(ckt_path, map_location=lambda storage, loc: storage)
@@ -53,6 +54,21 @@ import torch.nn as nn
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+class SigmoidBCELoss(nn.Module):
+    """Sigmoid Binary Cross Entropy
+    """
+
+    def __init__(self, weight=1.0, reduction='mean'):
+        super(SigmoidBCELoss, self).__init__()
+        self.weight = weight
+        self.reduction = reduction
+        self.m = nn.Sigmoid()
+        self.loss = nn.BCELoss(weight=torch.tensor([self.weight]), reduction=self.reduction)
+
+    def forward(self, logits, labels):
+        one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
+        output = self.loss(self.m(logits), one_hot_labels)
+        return output
 class TopKSoftmax(nn.Module):
     def __init__(self, k=10, dim=-1):
         super(TopKSoftmax, self).__init__()
@@ -64,7 +80,7 @@ class TopKSoftmax(nn.Module):
         topk_vals, topk_indices = torch.topk(logits, self.k, dim=self.dim)
 
         # 对前K大的值做Softmax
-        topk_softmax = F.softmax(topk_vals, dim=self.dim)
+        topk_softmax = F.sigmoid(topk_vals)
 
         # 构建与logits形状相同的全0矩阵
         softmax_output = torch.zeros_like(logits)
@@ -96,7 +112,7 @@ class SigmoidBCELoss(nn.Module):
 class SparsemaxBCELoss(nn.Module):
     """Sparsemax Binary Cross Entropy Loss"""
 
-    def __init__(self, weight=50, reduction='mean'):
+    def __init__(self, weight=1.0, reduction='mean'):
         super(SparsemaxBCELoss, self).__init__()
         self.weight = weight
         self.reduction = reduction
@@ -139,7 +155,7 @@ class Trainer:
         self.extra_batch_size = 0
         self.extra_flag = self.args.add_extra_batch
         # define loss function (criterion) and optimizer
-        self.criterion =SparsemaxBCELoss().cuda()
+        self.criterion = nn.CrossEntropyLoss(reduction='mean').cuda()
         # self.criterion2 = SigmoidBCELoss(reduction='mean').cuda()
         self.criterion2 = nn.BCEWithLogitsLoss(reduction='mean').cuda()
 
@@ -268,7 +284,7 @@ class Trainer:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(**batch_dict)
             else:
-                outputs = self.model(**batch_dict)
+                    outputs = self.model(**batch_dict)
             outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
                                            extra_tail=tail_vector)
             outputs = ModelOutput(**outputs)
@@ -368,17 +384,9 @@ class Trainer:
             if len(candidate_index) > 0:
                 batch_dict['triplet_mask'] = construct_mask_extra_batch([ex for ex in batch_dict['batch_data']].copy(),
                                                                         total_tail_id.copy())
-            if self.args.random_hop_mask:
-
-                random_number = random.randint(-4, 10)
-                if random_number <= 0:
-                    pass
-                else:
-                    logger.info(str(random_number)+'跳')
-                    logger.info(batch_dict['triplet_mask'])
-                    temp_mask = construct_n_hop_mask(total_head_id, total_tail_id, n_hop=random_number)
-                    batch_dict['triplet_mask'] = batch_dict['triplet_mask'] & temp_mask
-                    logger.info(batch_dict['triplet_mask'])
+            if self.args.add_hop_mask>0:
+                temp_mask = construct_n_hop_mask(total_head_id, total_tail_id, n_hop=self.args.add_hop_mask)
+                batch_dict['triplet_mask'] = batch_dict['triplet_mask'] & temp_mask
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
@@ -386,6 +394,7 @@ class Trainer:
             self.model.train()
             batch_size = len(batch_dict['batch_data'])
             # compute output
+
             if self.args.use_amp:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(**batch_dict)
@@ -401,15 +410,48 @@ class Trainer:
             # loss = self.criterion(logits, labels)
             if self.args.use_special_loss:
                 forward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
-                backward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[0]).float()
                 loss1 = self.criterion(logits, labels)
                 loss2 = self.criterion2(logits, forward_one_hot_labels)
-                # tail -> head + relation
+                backward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[0]).float()
                 loss3 = self.criterion(logits[:, :batch_size].t(), labels)
                 loss4 = self.criterion2(logits[:, :batch_size].t(), backward_one_hot_labels)
                 # loss += self.criterion(logits[:, :batch_size].t(), labels)
-#                loss = loss1+loss2+loss3+loss4
-                loss = loss1 + loss3
+                loss = loss1 + loss2 + loss3 + loss4
+                '''
+                labels_one_hot = F.one_hot(labels, num_classes=logits.shape[-1]).float()
+                second_to_n = 20
+
+                # 计算 targets_sigmoid (多标签分类)
+                targets_sigmoid = labels_one_hot[:, 1:second_to_n + 1].float()
+
+                # 计算 targets_softmax (多分类)
+                targets_softmax = torch.cat((labels_one_hot[:, :1], labels_one_hot[:, second_to_n + 1:]), dim=1).argmax(
+                    dim=1).long()
+
+                # 将 logits 分割成两部分
+                logits_sigmoid = logits[:, 1:second_to_n + 1]
+                logits_softmax = torch.cat((logits[:, :1], logits[:, second_to_n + 1:]), dim=1)
+
+                # 计算 loss1 和 loss2
+                loss1 = self.criterion(logits_softmax, targets_softmax)
+                loss2 = self.criterion2(logits_sigmoid, targets_sigmoid)
+
+                # 计算 loss3 (头关系到尾实体的损失)
+                logits_transposed = logits[:, :batch_size].t()  # 转置 logits
+                logits_transposed_softmax = torch.cat(
+                    (logits_transposed[:, :1], logits_transposed[:, second_to_n + 1:]), dim=1)
+                targets_transposed_softmax = torch.cat((labels_one_hot[:, :1], labels_one_hot[:, second_to_n + 1:]),
+                                                       dim=1).argmax(dim=1).long()
+                loss3 = self.criterion(logits_transposed_softmax, targets_transposed_softmax)
+
+                # 计算 loss4 (尾实体到头关系的损失)
+                logits_transposed_sigmoid = logits_transposed[:, 1:second_to_n + 1]
+                targets_transposed_sigmoid = labels_one_hot[:, 1:second_to_n + 1].float()
+                loss4 = self.criterion2(logits_transposed_sigmoid, targets_transposed_sigmoid)
+
+                # 合并损失
+                loss = loss1 + loss2 + loss3 + loss4
+                '''
             else:
                 loss1 = self.criterion(logits, labels)
                 loss3 = self.criterion(logits[:, :batch_size].t(), labels)
@@ -487,16 +529,60 @@ class Trainer:
             batch_size=max(self.args.batch_size, 512),
             collate_fn=collate,
             shuffle=False)
-
-        hr_tensor_list, tail_tensor_list = [], []
+        hr_tensor_list, tail_tensor_list= [], []
         for idx, batch_dict in enumerate(data_loader):
             if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
             hr_tensor_list.append(outputs['hr_vector'])
             tail_tensor_list.append(outputs['tail_vector'])
-
         return torch.cat(hr_tensor_list, dim=0), torch.cat(tail_tensor_list, dim=0)
+
+    @torch.no_grad()
+    def predict_by_examples_new(self, all_entity_exs, valid_examples):
+        # get all entity encode without pool
+        examples = []
+        for entity_ex in all_entity_exs:
+            examples.append(Example(head_id='', relation='',
+                                    tail_id=entity_ex.entity_id))
+        data_loader = torch.utils.data.DataLoader(
+            Dataset(path='', examples=examples, task=self.args.task),
+            num_workers=2,
+            batch_size=max(self.args.batch_size, 1024),
+            collate_fn=collate,
+            shuffle=False)
+
+        ent_tensor_list, ent_tensor_list_mask = [], []
+        for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
+            batch_dict['only_ent_embedding'] = True
+            if torch.cuda.is_available():
+                batch_dict = move_to_cuda(batch_dict)
+            outputs = self.model(**batch_dict)
+            ent_tensor_list.append(outputs['ent_vectors'])
+            ent_tensor_list_mask.append(outputs['tail_mask'])
+        
+        self.model.module.total_tail = torch.cat(ent_tensor_list, dim=0).cpu()
+        self.model.module.total_tail_mask = torch.cat(ent_tensor_list_mask, dim=0).cpu()
+        del ent_tensor_list, ent_tensor_list_mask
+        torch.cuda.empty_cache()
+
+        # get valid examples encode with cross attention
+        data_loader = torch.utils.data.DataLoader(
+            Dataset(path='', examples=valid_examples, task=self.args.task),
+            num_workers=1,
+            batch_size=len(valid_examples),
+            collate_fn=collate,
+            shuffle=False)
+
+        hr_tensor_list = []
+        for idx, batch_dict in enumerate(data_loader):
+            if torch.cuda.is_available():
+                batch_dict = move_to_cuda(batch_dict)
+            outputs = self.model.module.eval_forward(**batch_dict)
+            hr_tensor_list.append(outputs['hr_vector'])
+            torch.cuda.empty_cache()
+        return torch.cat(hr_tensor_list, dim=0)
+
 
     @torch.no_grad()
     def predict_by_entities(self, entity_exs) -> torch.tensor:
@@ -514,6 +600,7 @@ class Trainer:
         ent_tensor_list = []
         for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
             batch_dict['only_ent_embedding'] = True
+            batch_dict['return_direct'] = True
             if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
@@ -529,13 +616,16 @@ class Trainer:
         start_time = time()
         examples = load_data(self.args.valid_path, add_forward_triplet=eval_forward,
                              add_backward_triplet=not eval_forward)
-
-        hr_tensor, _ = self.predict_by_examples(examples)
+        if not self.args.use_cross_attention:
+            hr_tensor, _ = self.predict_by_examples(examples)
+        else:
+            hr_tensor = self.predict_by_examples_new(all_entity_exs = entity_dict.entity_exs, valid_examples = examples)
         hr_tensor = hr_tensor.to(entity_tensor.device)
         target = [entity_dict.entity_to_idx(ex.tail_id) for ex in examples]
         logger.info('predict tensor done, compute metrics...')
-
-        topk_scores, topk_indices, metrics, ranks = compute_metrics(hr_tensor=hr_tensor, entities_tensor=entity_tensor,
+        print(hr_tensor.shape, entity_tensor.shape)
+        topk_scores, topk_indices, metrics, ranks = compute_metrics(hr_tensor=hr_tensor,
+                                                                    entities_tensor=entity_tensor,
                                                                     target=target, examples=examples,
                                                                     batch_size=batch_size)
         eval_dir = 'forward' if eval_forward else 'backward'
