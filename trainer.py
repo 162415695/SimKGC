@@ -398,8 +398,12 @@ class Trainer:
             if self.args.use_amp:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(**batch_dict)
+                    if self.args.use_cross_attention:
+                        outputs = self.model.module.forward_cross_attention(**outputs)
             else:
                 outputs = self.model(**batch_dict)
+                if self.args.use_cross_attention:
+                    outputs = self.model.module.forward_cross_attention(**outputs)
 
             outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
                                            extra_tail=tail_vector)
@@ -499,6 +503,7 @@ class Trainer:
                                 logger.info("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
                                 self.extra_flag = False
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
+
         return False
 
     def _setup_training(self):
@@ -522,21 +527,24 @@ class Trainer:
             assert False, 'Unknown lr scheduler: {}'.format(self.args.scheduler)
 
     @torch.no_grad()
-    def predict_by_examples(self, examples: List[Example]):
+    def predict_by_examples(self, examples: List[Example], entities_tensor):
         data_loader = torch.utils.data.DataLoader(
             Dataset(path='', examples=examples, task=self.args.task),
             num_workers=1,
             batch_size=max(self.args.batch_size, 512),
             collate_fn=collate,
             shuffle=False)
-        hr_tensor_list, tail_tensor_list= [], []
+        hr_tensor_list = []
         for idx, batch_dict in enumerate(data_loader):
             if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
-            hr_tensor_list.append(outputs['hr_vector'])
-            tail_tensor_list.append(outputs['tail_vector'])
-        return torch.cat(hr_tensor_list, dim=0), torch.cat(tail_tensor_list, dim=0)
+            if self.args.use_cross_attention:
+                outputs = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor)
+                hr_tensor_list.append(outputs)
+            else:
+                hr_tensor_list.append(outputs['hr_vector'])
+        return torch.cat(hr_tensor_list, dim=0)
 
     @torch.no_grad()
     def predict_by_examples_new(self, all_entity_exs, valid_examples):
@@ -552,18 +560,16 @@ class Trainer:
             collate_fn=collate,
             shuffle=False)
 
-        ent_tensor_list, ent_tensor_list_mask = [], []
+        ent_tensor_list  = []
         for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
             batch_dict['only_ent_embedding'] = True
             if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
             ent_tensor_list.append(outputs['ent_vectors'])
-            ent_tensor_list_mask.append(outputs['tail_mask'])
-        
+
         self.model.module.total_tail = torch.cat(ent_tensor_list, dim=0).cpu()
-        self.model.module.total_tail_mask = torch.cat(ent_tensor_list_mask, dim=0).cpu()
-        del ent_tensor_list, ent_tensor_list_mask
+        del ent_tensor_list
         torch.cuda.empty_cache()
 
         # get valid examples encode with cross attention
@@ -616,10 +622,11 @@ class Trainer:
         start_time = time()
         examples = load_data(self.args.valid_path, add_forward_triplet=eval_forward,
                              add_backward_triplet=not eval_forward)
-        if not self.args.use_cross_attention:
-            hr_tensor, _ = self.predict_by_examples(examples)
-        else:
-            hr_tensor = self.predict_by_examples_new(all_entity_exs = entity_dict.entity_exs, valid_examples = examples)
+        hr_tensor = self.predict_by_examples(examples, entity_tensor)
+        # if not self.args.use_cross_attention:
+        #     hr_tensor, _ = self.predict_by_examples(examples)
+        # else:
+        #     hr_tensor = self.predict_by_examples_new(all_entity_exs = entity_dict.entity_exs, valid_examples = examples)
         hr_tensor = hr_tensor.to(entity_tensor.device)
         target = [entity_dict.entity_to_idx(ex.tail_id) for ex in examples]
         logger.info('predict tensor done, compute metrics...')

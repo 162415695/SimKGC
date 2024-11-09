@@ -94,6 +94,8 @@ parser.add_argument('--use-special-loss', default=False, action='store_true',
                     help='random extra loss function')
 parser.add_argument('--use-cross-attention', default=False, action='store_true',
                     help='')
+parser.add_argument('--test-opinion', default=False, action='store_true',
+                    help='')
 args = parser.parse_args()
 if not args.skip:
     assert not args.train_path or os.path.exists(args.train_path)

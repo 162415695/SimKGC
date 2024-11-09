@@ -135,10 +135,7 @@ def eval_single_direction(predictor: BertPredictor,
                           batch_size=256) -> dict:
     start_time = time()
     examples = load_data(args.valid_path, add_forward_triplet=eval_forward, add_backward_triplet=not eval_forward)
-    if not args.use_cross_attention:
-        hr_tensor, _ = predictor.predict_by_examples(examples)
-    else:
-        hr_tensor, _ = predictor.predict_by_examples_new(_setup_entity_dict(),examples)
+    hr_tensor = predictor.predict_by_examples(examples,entity_tensor)
     hr_tensor = hr_tensor.to(entity_tensor.device)
     target = [entity_dict.entity_to_idx(ex.tail_id) for ex in examples]
     logger.info('predict tensor done, compute metrics...')

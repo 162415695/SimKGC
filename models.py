@@ -23,112 +23,107 @@ class ModelOutput:
     hr_vector: torch.tensor
     tail_vector: torch.tensor
 
+
 class CrossAttention(nn.Module):
     def __init__(self, in_dim1, in_dim2, k_dim, v_dim, num_heads):
         super(CrossAttention, self).__init__()
         self.num_heads = num_heads
         self.k_dim = k_dim
         self.v_dim = v_dim
-        
+        self.x2 = None
         self.proj_q1 = nn.Linear(in_dim1, k_dim * num_heads, bias=False)
         self.proj_k2 = nn.Linear(in_dim2, k_dim * num_heads, bias=False)
         self.proj_v2 = nn.Linear(in_dim2, v_dim * num_heads, bias=False)
         self.proj_o = nn.Linear(v_dim * num_heads, in_dim1)
+
     def forward(self, x1, x2, tail_mask=None):
-        batch_size, seq_len1, in_dim1 = x1.size()
-        seq_len2 = x2.size(1)
-
+        batch_size, in_dim1 = x1.size()
         # 计算 q1
-        q1 = self.proj_q1(x1).view(batch_size, seq_len1, self.num_heads, self.k_dim).permute(0, 2, 1, 3)
-        # 计算 num_batches
-           # 计算 k2
-        k2 = self.proj_k2(x2).view(x2.size(0), seq_len2, self.num_heads, self.k_dim).permute(0, 2, 3, 1)
+        q1 = self.proj_q1(x1).view(batch_size, self.num_heads, self.k_dim).permute(1, 0,
+                                                                                   2)  # num_head, batch_size_A, dim
 
-        v2 = self.proj_v2(x2).view(x2.size(0), seq_len2, self.num_heads, self.v_dim).permute(0, 2, 1, 3)
-
-        attn = torch.matmul(q1, k2) / self.k_dim ** 0.5
-        attn = F.softmax(attn, dim=-1)
-        output = torch.matmul(attn, v2).permute(0, 2, 1, 3).contiguous().view(x2.size(0), seq_len1, -1)
-        output = self.proj_o(output)
-        cls_output = output[:, 0, :]
-        # 使用 tail_mask 进行池化
-        output = _pool_output(args.pooling, cls_output, tail_mask, output)
+        q1 = nn.functional.normalize(q1, dim=1)  # 计算 num_batches
+        # 计算 k2
+        k2 = self.proj_k2(x2).view(x2.size(0), self.num_heads, self.k_dim).permute(1, 2,
+                                                                                   0)  # num_head, dim, batch_size_B
+        k2 = nn.functional.normalize(k2, dim=1)
+        v2 = self.proj_v2(x2).view(x2.size(0), self.num_heads, self.v_dim).permute(1, 0,
+                                                                                   2)  # num_head, batch_size_B, dim
+        v2 = nn.functional.normalize(v2, dim=1)
+        attn = torch.matmul(q1, k2) / self.k_dim ** 0.5  # num_head, batch_size_A, batch_size_B
+        attn = nn.functional.normalize(attn, dim=1)
+        output = torch.matmul(attn, v2).permute(1, 0, 2).contiguous().view(x1.size(0),
+                                                                           -1)  # num_head, batch_size_A, dim -> batch_size_A, num_head, dim -> batch_size_A, num_head*dim
+        output = nn.functional.normalize(self.proj_o(output), dim=1)
+        # output = output.to(torch.float32)
         return output
+
     def eval_forward(self, x1, x2, tail_mask=None):
-        batch_size, seq_len1, in_dim1 = x1.size()
-        seq_len2 = x2.size(1)
+        batch_size, in_dim1 = x1.size()
 
         # 计算 q1
-        q1 = self.proj_q1(x1).view(batch_size, seq_len1, self.num_heads, self.k_dim).permute(0, 2, 1, 3)
+        q1 = self.proj_q1(x1).view(batch_size, self.num_heads, self.k_dim).permute(1, 0, 2)
 
         # 计算 num_batches
         num_batches = (x2.shape[0] + batch_size - 1) // batch_size
-        total_attn = []
-        total_v2=[]
+        total_k2 = []
+        total_v2 = []
         for i in range(num_batches):
             start_idx = i * batch_size
             end_idx = min(start_idx + batch_size, x2.shape[0])  # 确保不越界
 
             # 处理当前 batch 的 x2
             x2_current = x2[start_idx:end_idx]
-
             # 计算 k2
-            k2 = self.proj_k2(x2_current).view(x2_current.size(0), seq_len2, self.num_heads, self.k_dim).permute(0, 2,
-                                                                                                                 3, 1)
+            k2_temp = self.proj_k2(x2_current).view(x2_current.size(0), self.num_heads, self.k_dim)
+            v2_temp = self.proj_v2(x2_current).view(x2_current.size(0), self.num_heads, self.v_dim)
+            total_v2.append(v2_temp)
+            total_k2.append(k2_temp)
+        k2 = torch.cat(total_k2, dim=0).permute(1, 2, 0)
+        v2 = torch.cat(total_v2, dim=0).permute(1, 0, 2)
+        attn = torch.matmul(q1, k2) / self.k_dim ** 0.5
+        attn = F.softmax(attn, dim=-1)
+        output = torch.matmul(attn, v2).permute(1, 0, 2).contiguous().view(x1.size(0), -1)
+        output = self.proj_o(output)
+        # output = output.to(torch.float32)
+        return output
 
-            # 如果 x2_current 的 batch size 小于 batch_size，补齐 0
-            if x2_current.size(0) < batch_size:
-                pad_size = batch_size - x2_current.size(0)
-                k2_padding = torch.zeros(pad_size, k2.size(1), k2.size(2), k2.size(3), device=k2.device)
-                k2 = torch.cat([k2, k2_padding], dim=0)
-            v2 = self.proj_v2(x2_current).view(x2_current.size(0), seq_len2, self.num_heads, self.v_dim).permute(0, 2, 1, 3)
-            # 注意力计算
-            attn = torch.matmul(q1, k2) / self.k_dim ** 0.5
-            attn = F.softmax(attn, dim=-1)
-            # 在计算完注意力后去除填充部分
-            if x2_current.size(0) < batch_size:
-                attn = attn[:x2_current.size(0)]
 
-            # 打印注意力形状以调试
+class CrossAttentionSimple(nn.Module):
+    def __init__(self, in_dim1, in_dim2, dim):
+        super(CrossAttentionSimple, self).__init__()
+        self.dim = dim
+        self.proj_q1 = nn.Linear(in_dim1, dim, bias=False)
+        self.proj_k2 = nn.Linear(in_dim2, dim, bias=False)
+        self.proj_v2 = nn.Linear(in_dim2, dim, bias=False)
+        self.proj_o = nn.Linear(dim, in_dim1)
 
-            total_v2.append(v2.cpu())
-            total_attn.append(attn)
-        logger.info('注意力计算完成')
-        v2 = torch.cat(total_v2, dim=0)
-        # 将所有注意力矩阵拼接起来
-        attn = torch.cat(total_attn, dim=0).to(v2.device)
-        logger.info('计算输出中')
-        output = torch.matmul(attn, v2).permute(0, 2, 1, 3).contiguous().view(x2.size(0), seq_len1, -1)
-        logger.info('输出计算完成')
-        new_output=[]
-        last_len=0
-        for i in range(num_batches):
-            start_idx = i * batch_size
-            end_idx = min(start_idx + batch_size, x2.shape[0])  # 确保不越界
-            last_len=end_idx - start_idx
-            output_current = move_to_cuda(output[start_idx:end_idx])
-            output_current = self.proj_o(output_current)
-            cls_output =  output_current[:, 0, :]
-            output_current = _pool_output(args.pooling, cls_output, tail_mask[start_idx:end_idx], output_current)
-            if output_current.size(0) < batch_size:
-                pad_size = batch_size - output_current.size(0)
-                output_current_padding = torch.zeros(pad_size, output_current.size(1), device=output_current.device)
-                output_current = torch.cat([output_current, output_current_padding], dim=0)
-            new_output.append(output_current)
-        new_output= torch.stack(new_output)
-        logger.info('映射模块完成')
-        if last_len!=batch_size:
-            mean_first_n = torch.mean(new_output[:len(new_output), :last_len], dim=0)
+    def forward(self, x1, x2):
+        batch_size, in_dim1 = x1.size()
+        # 计算 q1
+        q1 = nn.functional.normalize(self.proj_q1(x1), dim=1)  # batch_size_A, dim
+        # 计算 num_batches
+        # 计算 k2
+        k2 = nn.functional.normalize(self.proj_k2(x2).permute(1, 0), dim=1)  # dim, batch_size_B
+        # 计算 v2
+        v2 = nn.functional.normalize(self.proj_v2(x2), dim=1)  # batch_size_B, dim
+        attn = torch.matmul(q1, k2)  # batch_size_A, batch_size_B
+        attn = nn.functional.normalize(attn, dim=1)
+        output = torch.matmul(attn, v2)  # batch_size_A, dim
+        output = nn.functional.normalize(self.proj_o(output), dim=1)
 
-            # 计算后 m-n 个元素的平均
-            mean_last_m_n = torch.mean(new_output[:len(new_output)-1, last_len:], dim=0)
-            result = torch.empty(batch_size,in_dim1)
-            result[:last_len] = mean_first_n
-            result[last_len:] = mean_last_m_n
-            new_output = result
-        else:
-            new_output=torch.mean(new_output,dim=0)
-        return new_output
+        return output
+
+    def test(self, x1, x2):
+        q1 = nn.functional.normalize(self.proj_q1(x1), dim=1)  # batch_size_A, dim
+        # 计算 num_batches
+        # 计算 k2
+        k2 = nn.functional.normalize(self.proj_k2(x2).permute(1, 0), dim=1)  # dim, batch_size_B
+        # 计算 v2
+        v2 = self.proj_v2(x2)  # batch_size_B, dim
+        attn = torch.matmul(q1, k2)  # batch_size_A, batch_size_B
+        return attn
+
 
 class CustomBertModel(nn.Module, ABC):
     def __init__(self, args):
@@ -149,9 +144,14 @@ class CustomBertModel(nn.Module, ABC):
 
         self.hr_bert = AutoModel.from_pretrained(self.args.pretrained_model)
         self.tail_bert = deepcopy(self.hr_bert)
-        self.cross_attention = CrossAttention(768,768,768,768,4)
-        self.total_tail=None
-        self.total_tail_mask=None
+        self.cross_attention = CrossAttention(768, 768, 768, 768, 4)
+        self.total_tail = None
+        self.total_tail_mask = None
+        if self.args.pretrained_ckpt:
+            for param in self.tail_bert.parameters():
+                param.requires_grad = False
+            for param in self.hr_bert.parameters():
+                param.requires_grad = False
 
     def _encode(self, encoder, token_ids, mask, token_type_ids):
         outputs = encoder(input_ids=token_ids,
@@ -163,6 +163,7 @@ class CustomBertModel(nn.Module, ABC):
         cls_output = last_hidden_state[:, 0, :]
         cls_output = _pool_output(self.args.pooling, cls_output, mask, last_hidden_state)
         return cls_output
+
     def _encode_without_pool(self, encoder, token_ids, mask, token_type_ids):
         outputs = encoder(input_ids=token_ids,
                           attention_mask=mask,
@@ -171,22 +172,17 @@ class CustomBertModel(nn.Module, ABC):
         last_hidden_state = outputs.last_hidden_state
         cls_output = last_hidden_state
         return cls_output
+
     def forward(self, hr_token_ids, hr_mask, hr_token_type_ids,
                 tail_token_ids, tail_mask, tail_token_type_ids,
                 head_token_ids, head_mask, head_token_type_ids,
                 rel_token_ids, rel_mask, rel_token_type_ids,
-                only_ent_embedding=False,return_direct=False, **kwargs) -> dict:
+                only_ent_embedding=False, return_direct=False, **kwargs) -> dict:
         if only_ent_embedding:
-            if return_direct or not self.args.use_cross_attention:
-                return self.predict_ent_embedding(tail_token_ids=tail_token_ids,
+            return self.predict_ent_embedding(tail_token_ids=tail_token_ids,
                                               tail_mask=tail_mask,
                                               tail_token_type_ids=tail_token_type_ids)
-            else:
-                return {'ent_vectors': self._encode_without_pool(self.tail_bert,
-                                   token_ids=tail_token_ids,
-                                   mask=tail_mask,
-                                   token_type_ids=tail_token_type_ids).detach()
-                        ,'tail_mask':tail_mask.detach()}
+
         tail_vector = self._encode(self.tail_bert,
                                    token_ids=tail_token_ids,
                                    mask=tail_mask,
@@ -195,37 +191,54 @@ class CustomBertModel(nn.Module, ABC):
                                    token_ids=head_token_ids,
                                    mask=head_mask,
                                    token_type_ids=head_token_type_ids)
-        if not self.args.use_cross_attention:
-            hr_vector = self._encode(self.hr_bert,
-                                    token_ids=hr_token_ids,
-                                    mask=hr_mask,
-                                    token_type_ids=hr_token_type_ids)
-        else:
-            # logger.info('rel_vector dtype: {}, head_vector dtype: {}'.format(rel_vector.dtype, head_vector.dtype))
-            temp_hr= self._encode_without_pool(self.hr_bert,
-                                    token_ids=hr_token_ids,
-                                    mask=hr_mask,
-                                    token_type_ids=hr_token_type_ids)
-            temp_tail = self._encode_without_pool(self.tail_bert,
-                                   token_ids=tail_token_ids,
-                                   mask=tail_mask,
-                                   token_type_ids=tail_token_type_ids)
-            indices = torch.randperm(temp_tail.size(0))  # size(0) 是 1024
-
-            # 使用生成的随机索引打乱张量
-            temp_tail = temp_tail[indices]
-            hr_vector=self.cross_attention(temp_hr,temp_tail,tail_mask)
+        hr_vector = self._encode(self.hr_bert,
+                                 token_ids=hr_token_ids,
+                                 mask=hr_mask,
+                                 token_type_ids=hr_token_type_ids)
+        # if not self.args.use_cross_attention:
+        #     hr_vector = self._encode(self.hr_bert,
+        #                              token_ids=hr_token_ids,
+        #                              mask=hr_mask,
+        #                              token_type_ids=hr_token_type_ids)
+        # else:
+        #     # logger.info('rel_vector dtype: {}, head_vector dtype: {}'.format(rel_vector.dtype, head_vector.dtype))
+        #     temp_hr = self._encode(self.hr_bert,
+        #                            token_ids=hr_token_ids,
+        #                            mask=hr_mask,
+        #                            token_type_ids=hr_token_type_ids)
+        #     temp_tail = self._encode(self.tail_bert,
+        #                              token_ids=tail_token_ids,
+        #                              mask=tail_mask,
+        #                              token_type_ids=tail_token_type_ids)
+        #     indices = torch.randperm(temp_tail.size(0))  # size(0) 是 1024
+        #     # 使用生成的随机索引打乱张量
+        #     temp_tail = temp_tail[indices]
+        #     hr_vector = self.cross_attention(temp_hr, temp_tail)
 
         return {
-                'hr_vector': hr_vector,
-                'tail_vector': tail_vector,
-                'head_vector': head_vector,
+            'hr_vector': hr_vector,
+            'tail_vector': tail_vector,
+            'head_vector': head_vector,
         }
+
+    def forward_cross_attention(self, hr_vector, tail_vector, head_vector=None) -> dict:
+        # print(hr_vector.shape, tail_vector.shape, head_vector.shape)
+        assert hr_vector.size(0) == self.batch_size
+        indices = torch.randperm(tail_vector.size(0))  # size(0) 是 batch_size
+        temp_tail = tail_vector[indices]
+        temp_tail = temp_tail.detach()
+        hr_vector = self.cross_attention(hr_vector, temp_tail)
+        return {
+            'hr_vector': hr_vector,
+            'tail_vector': tail_vector,
+            'head_vector': head_vector,
+        }
+
     def eval_forward(self, hr_token_ids, hr_mask, hr_token_type_ids,
-                tail_token_ids, tail_mask, tail_token_type_ids,
-                head_token_ids, head_mask, head_token_type_ids,
-                rel_token_ids, rel_mask, rel_token_type_ids,
-                only_ent_embedding=False, **kwargs) -> dict:
+                     tail_token_ids, tail_mask, tail_token_type_ids,
+                     head_token_ids, head_mask, head_token_type_ids,
+                     rel_token_ids, rel_mask, rel_token_type_ids,
+                     only_ent_embedding=False, **kwargs) -> dict:
         # tail_vector = self._encode(self.tail_bert,
         #                            token_ids=tail_token_ids,
         #                            mask=tail_mask,
@@ -236,10 +249,10 @@ class CustomBertModel(nn.Module, ABC):
         #                            token_type_ids=head_token_type_ids)
 
         # logger.info('rel_vector dtype: {}, head_vector dtype: {}'.format(rel_vector.dtype, head_vector.dtype))
-        temp_hr= self._encode_without_pool(self.hr_bert,
-                                token_ids=hr_token_ids,
-                                mask=hr_mask,
-                                token_type_ids=hr_token_type_ids)
+        temp_hr = self._encode(self.hr_bert,
+                               token_ids=hr_token_ids,
+                               mask=hr_mask,
+                               token_type_ids=hr_token_type_ids)
         # temp_tail = self._encode_without_pool(self.tail_bert,
         #                        token_ids=tail_token_ids,
         #                        mask=tail_mask,
@@ -248,15 +261,14 @@ class CustomBertModel(nn.Module, ABC):
         # # 使用生成的随机索引打乱张量
         # temp_tail = temp_tail[indices]
         self.total_tail = self.total_tail.to(temp_hr.device)
-        self.total_tail_mask = self.total_tail_mask.to(temp_hr.device)
-        hr_vector =  self.cross_attention.eval_forward(temp_hr,self.total_tail,self.total_tail_mask)
+        hr_vector = self.cross_attention.eval_forward(temp_hr, self.total_tail)
         self.total_tail = self.total_tail.cpu()
-        self.total_tail_mask = self.total_tail_mask.cpu()
         return {
-                'hr_vector': hr_vector,
-                # 'tail_vector': tail_vector,
-                # 'head_vector': head_vector,
+            'hr_vector': hr_vector,
+            # 'tail_vector': tail_vector,
+            # 'head_vector': head_vector,
         }
+
     def compute_logits(self, output_dict: dict, batch_dict: dict, extra_tail=None) -> dict:
         if len(extra_tail) == 0:
             hr_vector, tail_vector = output_dict['hr_vector'], output_dict['tail_vector']
@@ -269,6 +281,8 @@ class CustomBertModel(nn.Module, ABC):
         batch_size = hr_vector.size(0)
         labels = torch.arange(batch_size).to(hr_vector.device)
         logits = hr_vector.mm(tail_vector.t())
+        if self.args.test_opinion:
+            logits = self.cross_attention.test(hr_vector, tail_vector)
 
         if self.training:
             logits -= torch.zeros(logits.size()).fill_diagonal_(self.add_margin).to(logits.device)

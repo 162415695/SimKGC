@@ -29,7 +29,7 @@ fi
 python3 -u main.py \
 --model-dir "${OUTPUT_DIR}" \
 --pretrained-model /mnt/data/yhy/model/bert-base-uncased \
---pooling cls \
+--pooling mean \
 --lr 1e-4 \
 --use-link-graph \
 --train-path "${DATA_DIR}/train.txt.json" \
@@ -40,7 +40,6 @@ python3 -u main.py \
 --batch-size 512 \
 --print-freq 20 \
 --additive-margin 0.02 \
---use-amp \
 --pre-batch 0 \
 --finetune-t \
 --epochs 50 \
