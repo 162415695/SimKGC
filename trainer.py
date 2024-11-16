@@ -143,7 +143,7 @@ class Trainer:
         if args.pretrained_ckpt is not None:
             logger.info("读取已有模型权重")
             try:
-                self.model.load_state_dict(model_load(ckt_path=args.pretrained_ckpt), strict=True)
+                self.model.load_state_dict(model_load(ckt_path=args.pretrained_ckpt), strict=False)
                 if torch.cuda.is_available():
                     self.model.cuda()
                     self.use_cuda = True
@@ -463,7 +463,6 @@ class Trainer:
             acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
             top1.update(acc1.item(), batch_size)
             top3.update(acc3.item(), batch_size)
-
             inv_t.update(outputs.inv_t, 1)
             losses.update(loss.item(), batch_size)
 
@@ -503,7 +502,6 @@ class Trainer:
                                 logger.info("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
                                 self.extra_flag = False
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
-
         return False
 
     def _setup_training(self):
@@ -540,7 +538,7 @@ class Trainer:
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
             if self.args.use_cross_attention:
-                outputs = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor)
+                outputs = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor,self.model.module.norm)
                 hr_tensor_list.append(outputs)
             else:
                 hr_tensor_list.append(outputs['hr_vector'])

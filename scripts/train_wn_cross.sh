@@ -30,7 +30,7 @@ python3 -u main.py \
 --model-dir "${OUTPUT_DIR}" \
 --pretrained-model /mnt/data/yhy/model/bert-base-uncased \
 --pooling mean \
---lr 1e-4 \
+--lr 5e-5 \
 --use-link-graph \
 --train-path "${DATA_DIR}/train.txt.json" \
 --valid-path "${DATA_DIR}/valid.txt.json" \
@@ -46,4 +46,5 @@ python3 -u main.py \
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
---use-cross-attention  "$@"
+--use-cross-attention \
+--pretrained-ckpt /mnt/data/yhy/projects/SimKGC/checkpoint/WN18RR_bert_base_best/model_last.mdl "$@"

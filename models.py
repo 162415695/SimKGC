@@ -34,28 +34,34 @@ class CrossAttention(nn.Module):
         self.proj_q1 = nn.Linear(in_dim1, k_dim * num_heads, bias=False)
         self.proj_k2 = nn.Linear(in_dim2, k_dim * num_heads, bias=False)
         self.proj_v2 = nn.Linear(in_dim2, v_dim * num_heads, bias=False)
-        self.proj_o = nn.Linear(v_dim * num_heads, in_dim1)
+        self.proj_o = nn.Linear(v_dim * num_heads, in_dim1, bias=False)
+        nn.init.kaiming_uniform_(self.proj_o.weight, nonlinearity='relu')
+        nn.init.kaiming_uniform_(self.proj_q1.weight, nonlinearity='relu')
+        nn.init.kaiming_uniform_(self.proj_k2.weight, nonlinearity='relu')
+        nn.init.kaiming_uniform_(self.proj_v2.weight, nonlinearity='relu')
 
-    def forward(self, x1, x2, tail_mask=None):
+    def forward(self, x1, x2, norm):
         batch_size, in_dim1 = x1.size()
         # 计算 q1
         q1 = self.proj_q1(x1).view(batch_size, self.num_heads, self.k_dim).permute(1, 0,
                                                                                    2)  # num_head, batch_size_A, dim
 
-        q1 = nn.functional.normalize(q1, dim=1)  # 计算 num_batches
+        #q1 = nn.functional.normalize(q1, dim=1)  # 计算 num_batches
         # 计算 k2
         k2 = self.proj_k2(x2).view(x2.size(0), self.num_heads, self.k_dim).permute(1, 2,
                                                                                    0)  # num_head, dim, batch_size_B
-        k2 = nn.functional.normalize(k2, dim=1)
+        #k2 = nn.functional.normalize(k2, dim=1)
         v2 = self.proj_v2(x2).view(x2.size(0), self.num_heads, self.v_dim).permute(1, 0,
                                                                                    2)  # num_head, batch_size_B, dim
-        v2 = nn.functional.normalize(v2, dim=1)
+        #v2 = nn.functional.normalize(v2, dim=1)
         attn = torch.matmul(q1, k2) / self.k_dim ** 0.5  # num_head, batch_size_A, batch_size_B
-        attn = nn.functional.normalize(attn, dim=1)
+        attn = torch.softmax(attn, dim=-1)
         output = torch.matmul(attn, v2).permute(1, 0, 2).contiguous().view(x1.size(0),
                                                                            -1)  # num_head, batch_size_A, dim -> batch_size_A, num_head, dim -> batch_size_A, num_head*dim
-        output = nn.functional.normalize(self.proj_o(output), dim=1)
+        output_temp = self.proj_o(output)
+        output = output_temp + x1
         # output = output.to(torch.float32)
+        output=norm(output)
         return output
 
     def eval_forward(self, x1, x2, tail_mask=None):
@@ -147,6 +153,7 @@ class CustomBertModel(nn.Module, ABC):
         self.cross_attention = CrossAttention(768, 768, 768, 768, 4)
         self.total_tail = None
         self.total_tail_mask = None
+        self.norm = nn.LayerNorm(768, eps=1e-6)
         if self.args.pretrained_ckpt:
             for param in self.tail_bert.parameters():
                 param.requires_grad = False
@@ -161,7 +168,7 @@ class CustomBertModel(nn.Module, ABC):
 
         last_hidden_state = outputs.last_hidden_state
         cls_output = last_hidden_state[:, 0, :]
-        cls_output = _pool_output(self.args.pooling, cls_output, mask, last_hidden_state)
+        cls_output = _pool_output(self.args.pooling, cls_output, mask, last_hidden_state,self.norm)
         return cls_output
 
     def _encode_without_pool(self, encoder, token_ids, mask, token_type_ids):
@@ -226,8 +233,8 @@ class CustomBertModel(nn.Module, ABC):
         assert hr_vector.size(0) == self.batch_size
         indices = torch.randperm(tail_vector.size(0))  # size(0) 是 batch_size
         temp_tail = tail_vector[indices]
-        temp_tail = temp_tail.detach()
-        hr_vector = self.cross_attention(hr_vector, temp_tail)
+        temp_tail = temp_tail
+        hr_vector = self.cross_attention(hr_vector, temp_tail,self.norm)
         return {
             'hr_vector': hr_vector,
             'tail_vector': tail_vector,
@@ -335,7 +342,8 @@ class CustomBertModel(nn.Module, ABC):
 def _pool_output(pooling: str,
                  cls_output: torch.tensor,
                  mask: torch.tensor,
-                 last_hidden_state: torch.tensor) -> torch.tensor:
+                 last_hidden_state: torch.tensor,
+                 norm) -> torch.tensor:
     if pooling == 'cls':
         output_vector = cls_output
     elif pooling == 'max':
@@ -350,5 +358,5 @@ def _pool_output(pooling: str,
     else:
         assert False, 'Unknown pooling mode: {}'.format(pooling)
 
-    output_vector = nn.functional.normalize(output_vector, dim=1)
+    output_vector = norm(output_vector)
     return output_vector

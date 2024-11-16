@@ -38,7 +38,7 @@ class BertPredictor:
             if k.startswith('module.'):
                 k = k[len('module.'):]
             new_state_dict[k] = v
-        self.model.load_state_dict(new_state_dict, strict=True)
+        self.model.load_state_dict(new_state_dict, strict=False)
         self.model.eval()
 
         if use_data_parallel and torch.cuda.device_count() > 1:
@@ -70,11 +70,11 @@ class BertPredictor:
 
         hr_tensor_list = []
         for idx, batch_dict in enumerate(data_loader):
-            if torch.cuda.is_available():
+            if self.use_cuda:
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
             if args.use_cross_attention:
-                outputs = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor)
+                outputs = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor,self.model.module.norm)
                 hr_tensor_list.append(outputs)
             else:
                 hr_tensor_list.append(outputs['hr_vector'])

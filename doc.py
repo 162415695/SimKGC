@@ -30,8 +30,7 @@ def _custom_tokenize(text: str,
                                add_special_tokens=True,
                                max_length=args.max_num_tokens,
                                return_token_type_ids=True,
-                               truncation=True,
-                               padding='max_length'
+                               truncation=True
                                )
     return encoded_inputs
 
