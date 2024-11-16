@@ -46,5 +46,4 @@ python3 -u main.py \
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
---use-cross-attention \
---pretrained-ckpt /mnt/data/yhy/projects/SimKGC/checkpoint/WN18RR_bert_base_best/model_last.mdl "$@"
+--use-cross-attention  "$@"
