@@ -12,7 +12,7 @@ import torch.utils.data
 import predict
 import tqdm
 from time import time
-from triplet_mask import construct_mask, construct_mask_extra_batch,construct_n_hop_mask
+from triplet_mask import construct_mask, construct_mask_extra_batch, construct_n_hop_mask
 from typing import Dict
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 from transformers import AdamW
@@ -30,6 +30,7 @@ from logger_config import logger
 from collections import OrderedDict
 
 entity_dict = _setup_entity_dict()
+
 
 def model_load(ckt_path):
     ckt_dict = torch.load(ckt_path, map_location=lambda storage, loc: storage)
@@ -69,6 +70,8 @@ class SigmoidBCELoss(nn.Module):
         one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
         output = self.loss(self.m(logits), one_hot_labels)
         return output
+
+
 class TopKSoftmax(nn.Module):
     def __init__(self, k=10, dim=-1):
         super(TopKSoftmax, self).__init__()
@@ -89,7 +92,6 @@ class TopKSoftmax(nn.Module):
         softmax_output.scatter_(self.dim, topk_indices, topk_softmax)
 
         return softmax_output
-
 
 
 class SigmoidBCELoss(nn.Module):
@@ -130,13 +132,13 @@ class SparsemaxBCELoss(nn.Module):
         loss = self.loss_fn(probs, one_hot_labels)
         return loss
 
+
 class Trainer:
 
     def __init__(self, args, ngpus_per_node):
         self.args = args
         self.ngpus_per_node = ngpus_per_node
         build_tokenizer(args)
-
         # create model
         logger.info("=> creating model")
         self.model = build_model(self.args)
@@ -152,7 +154,10 @@ class Trainer:
                 logger.info("读取失败")
         logger.info(self.model)
         self._setup_training()
-        self.extra_batch_size = 0
+        if not args.add_extra_batch:
+            self.extra_batch_size = args.extra_batch_limit
+        else:
+            self.extra_batch_size = 0
         self.extra_flag = self.args.add_extra_batch
         # define loss function (criterion) and optimizer
         self.criterion = nn.CrossEntropyLoss(reduction='mean').cuda()
@@ -200,6 +205,8 @@ class Trainer:
         if self.args.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
         epoch = 0
+        if self.args.pretrained_ckpt:
+            self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
         while epoch < self.args.epochs:
             # train for one epoch
             extra_flag = self.train_epoch(epoch)
@@ -215,7 +222,7 @@ class Trainer:
         filename = '{}/checkpoint_{}_{}.mdl'.format(self.args.model_dir, epoch, step)
         if step == 0:
             filename = '{}/checkpoint_epoch{}.mdl'.format(self.args.model_dir, epoch)
-        if step == 0:
+        if extra_batch_num > 0:
             filename = '{}/checkpoint_epoch{}_extra_batch{}.mdl'.format(self.args.model_dir, epoch, extra_batch_num)
 
         save_checkpoint({
@@ -284,12 +291,17 @@ class Trainer:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(**batch_dict)
             else:
-                    outputs = self.model(**batch_dict)
+                outputs = self.model(**batch_dict)
             outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
                                            extra_tail=tail_vector)
             outputs = ModelOutput(**outputs)
+
             logits, labels = outputs.logits, outputs.labels
-            loss = self.criterion(logits, labels)
+            loss1 = self.criterion(logits, labels)
+            loss3 = self.criterion(logits[:, :batch_size].t(), labels)
+            loss = loss1 + loss3
+            if self.args.use_special_loss:
+                loss += outputs.extra_loss
             losses.update(loss.item(), batch_size)
 
             acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
@@ -302,8 +314,8 @@ class Trainer:
         logger.info('Epoch {}, valid metric: {}'.format(epoch, json.dumps(metric_dict)))
         return metric_dict
 
-    def reset_learning_rate(self,  total_steps):
-    # 重置优化器的学习率
+    def reset_learning_rate(self, total_steps):
+        # 重置优化器的学习率
         if self.current_steps <= self.args.warmup:
             new_lr = self.args.lr
         else:
@@ -323,7 +335,7 @@ class Trainer:
                 num_training_steps=total_steps
             )
         elif self.args.lr_scheduler == 'cosine':
-            self.scheduler =  get_cosine_schedule_with_warmup(
+            self.scheduler = get_cosine_schedule_with_warmup(
                 self.optimizer,
                 num_warmup_steps=warmup_steps,
                 num_training_steps=total_steps
@@ -335,13 +347,14 @@ class Trainer:
         top1 = AverageMeter('Acc@1', ':6.2f')
         top3 = AverageMeter('Acc@3', ':6.2f')
         inv_t = AverageMeter('InvT', ':6.2f')
+        alpha = AverageMeter('alpha', ':.4')
         if self.extra_flag:
             prefix = "Epoch: [{}],extra_batch:[{}]".format(epoch, self.extra_batch_size)
         else:
             prefix = "Epoch: [{}]".format(epoch)
         progress = ProgressMeter(
             len(self.train_loader),
-            [losses, inv_t, top1, top3],
+            [losses, inv_t, top1, top3, alpha],
             prefix=prefix)
         total_train_batch = {i: k for i, k in enumerate(self.train_loader)}
         for i, batch_dict in total_train_batch.items():
@@ -384,7 +397,7 @@ class Trainer:
             if len(candidate_index) > 0:
                 batch_dict['triplet_mask'] = construct_mask_extra_batch([ex for ex in batch_dict['batch_data']].copy(),
                                                                         total_tail_id.copy())
-            if self.args.add_hop_mask>0:
+            if self.args.add_hop_mask > 0:
                 temp_mask = construct_n_hop_mask(total_head_id, total_tail_id, n_hop=self.args.add_hop_mask)
                 batch_dict['triplet_mask'] = batch_dict['triplet_mask'] & temp_mask
             if torch.cuda.is_available():
@@ -398,72 +411,26 @@ class Trainer:
             if self.args.use_amp:
                 with torch.cuda.amp.autocast():
                     outputs = self.model(**batch_dict)
-                    if self.args.use_cross_attention:
-                        outputs = self.model.module.forward_cross_attention(**outputs)
             else:
                 outputs = self.model(**batch_dict)
-                if self.args.use_cross_attention:
-                    outputs = self.model.module.forward_cross_attention(**outputs)
-
             outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
                                            extra_tail=tail_vector)
             outputs = ModelOutput(**outputs)
+
             logits, labels = outputs.logits, outputs.labels
             assert logits.size(0) == batch_size
             # head + relation -> tail
             # loss = self.criterion(logits, labels)
+            loss1 = self.criterion(logits, labels)
+            loss3 = self.criterion(logits[:, :batch_size].t(), labels)
+            loss = loss1 + loss3
             if self.args.use_special_loss:
-                forward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[-1]).float()
-                loss1 = self.criterion(logits, labels)
-                loss2 = self.criterion2(logits, forward_one_hot_labels)
-                backward_one_hot_labels = F.one_hot(labels, num_classes=logits.shape[0]).float()
-                loss3 = self.criterion(logits[:, :batch_size].t(), labels)
-                loss4 = self.criterion2(logits[:, :batch_size].t(), backward_one_hot_labels)
-                # loss += self.criterion(logits[:, :batch_size].t(), labels)
-                loss = loss1 + loss2 + loss3 + loss4
-                '''
-                labels_one_hot = F.one_hot(labels, num_classes=logits.shape[-1]).float()
-                second_to_n = 20
-
-                # 计算 targets_sigmoid (多标签分类)
-                targets_sigmoid = labels_one_hot[:, 1:second_to_n + 1].float()
-
-                # 计算 targets_softmax (多分类)
-                targets_softmax = torch.cat((labels_one_hot[:, :1], labels_one_hot[:, second_to_n + 1:]), dim=1).argmax(
-                    dim=1).long()
-
-                # 将 logits 分割成两部分
-                logits_sigmoid = logits[:, 1:second_to_n + 1]
-                logits_softmax = torch.cat((logits[:, :1], logits[:, second_to_n + 1:]), dim=1)
-
-                # 计算 loss1 和 loss2
-                loss1 = self.criterion(logits_softmax, targets_softmax)
-                loss2 = self.criterion2(logits_sigmoid, targets_sigmoid)
-
-                # 计算 loss3 (头关系到尾实体的损失)
-                logits_transposed = logits[:, :batch_size].t()  # 转置 logits
-                logits_transposed_softmax = torch.cat(
-                    (logits_transposed[:, :1], logits_transposed[:, second_to_n + 1:]), dim=1)
-                targets_transposed_softmax = torch.cat((labels_one_hot[:, :1], labels_one_hot[:, second_to_n + 1:]),
-                                                       dim=1).argmax(dim=1).long()
-                loss3 = self.criterion(logits_transposed_softmax, targets_transposed_softmax)
-
-                # 计算 loss4 (尾实体到头关系的损失)
-                logits_transposed_sigmoid = logits_transposed[:, 1:second_to_n + 1]
-                targets_transposed_sigmoid = labels_one_hot[:, 1:second_to_n + 1].float()
-                loss4 = self.criterion2(logits_transposed_sigmoid, targets_transposed_sigmoid)
-
-                # 合并损失
-                loss = loss1 + loss2 + loss3 + loss4
-                '''
-            else:
-                loss1 = self.criterion(logits, labels)
-                loss3 = self.criterion(logits[:, :batch_size].t(), labels)
-                loss = loss1 + loss3
+                loss += outputs.extra_loss
             acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
             top1.update(acc1.item(), batch_size)
             top3.update(acc3.item(), batch_size)
             inv_t.update(outputs.inv_t, 1)
+            alpha.update(self.model.module.cross_attention.alpha.item(),1)
             losses.update(loss.item(), batch_size)
 
             # compute gradient and do SGD step
@@ -482,8 +449,8 @@ class Trainer:
             if i % self.args.print_freq == 0:
                 progress.display(i)
                 if self.extra_flag:
-                    if acc1 > 90:
-                        logger.info("acc1已超过90%,添加额外待预测的尾实体")
+                    if acc1 > 98:
+                        logger.info("acc1已超过98%,添加额外待预测的尾实体")
 
                         if self.extra_batch_size == 0 and self.extra_batch_limit != 0:
                             self.extra_batch_size = 1
@@ -538,7 +505,7 @@ class Trainer:
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
             if self.args.use_cross_attention:
-                outputs = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor,self.model.module.norm)
+                outputs,_ = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor)
                 hr_tensor_list.append(outputs)
             else:
                 hr_tensor_list.append(outputs['hr_vector'])
@@ -558,7 +525,7 @@ class Trainer:
             collate_fn=collate,
             shuffle=False)
 
-        ent_tensor_list  = []
+        ent_tensor_list = []
         for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
             batch_dict['only_ent_embedding'] = True
             if torch.cuda.is_available():
@@ -586,7 +553,6 @@ class Trainer:
             hr_tensor_list.append(outputs['hr_vector'])
             torch.cuda.empty_cache()
         return torch.cat(hr_tensor_list, dim=0)
-
 
     @torch.no_grad()
     def predict_by_entities(self, entity_exs) -> torch.tensor:

@@ -22,6 +22,7 @@ class ModelOutput:
     inv_t: torch.tensor
     hr_vector: torch.tensor
     tail_vector: torch.tensor
+    extra_loss: torch.tensor
 
 
 class CrossAttention(nn.Module):
@@ -39,8 +40,9 @@ class CrossAttention(nn.Module):
         nn.init.kaiming_uniform_(self.proj_q1.weight, nonlinearity='relu')
         nn.init.kaiming_uniform_(self.proj_k2.weight, nonlinearity='relu')
         nn.init.kaiming_uniform_(self.proj_v2.weight, nonlinearity='relu')
+        self.alpha = torch.nn.Parameter(torch.tensor(0.5))
 
-    def forward(self, x1, x2, norm):
+    def forward(self, x1, x2):
         batch_size, in_dim1 = x1.size()
         # 计算 q1
         q1 = self.proj_q1(x1).view(batch_size, self.num_heads, self.k_dim).permute(1, 0,
@@ -59,10 +61,10 @@ class CrossAttention(nn.Module):
         output = torch.matmul(attn, v2).permute(1, 0, 2).contiguous().view(x1.size(0),
                                                                            -1)  # num_head, batch_size_A, dim -> batch_size_A, num_head, dim -> batch_size_A, num_head*dim
         output_temp = self.proj_o(output)
-        output = output_temp + x1
         # output = output.to(torch.float32)
-        output=norm(output)
-        return output
+        output = nn.functional.normalize(output_temp, dim=1)
+        new_output = nn.functional.normalize(self.alpha * x1 + (1 - self.alpha) * output, dim=1)
+        return new_output,output
 
     def eval_forward(self, x1, x2, tail_mask=None):
         batch_size, in_dim1 = x1.size()
@@ -92,6 +94,7 @@ class CrossAttention(nn.Module):
         output = torch.matmul(attn, v2).permute(1, 0, 2).contiguous().view(x1.size(0), -1)
         output = self.proj_o(output)
         # output = output.to(torch.float32)
+
         return output
 
 
@@ -147,13 +150,11 @@ class CustomBertModel(nn.Module, ABC):
                              persistent=False)
         self.offset = 0
         self.pre_batch_exs = [None for _ in range(num_pre_batch_vectors)]
-
         self.hr_bert = AutoModel.from_pretrained(self.args.pretrained_model)
         self.tail_bert = deepcopy(self.hr_bert)
         self.cross_attention = CrossAttention(768, 768, 768, 768, 4)
         self.total_tail = None
         self.total_tail_mask = None
-        self.norm = nn.LayerNorm(768, eps=1e-6)
         if self.args.pretrained_ckpt:
             for param in self.tail_bert.parameters():
                 param.requires_grad = False
@@ -168,7 +169,7 @@ class CustomBertModel(nn.Module, ABC):
 
         last_hidden_state = outputs.last_hidden_state
         cls_output = last_hidden_state[:, 0, :]
-        cls_output = _pool_output(self.args.pooling, cls_output, mask, last_hidden_state,self.norm)
+        cls_output = _pool_output(self.args.pooling, cls_output, mask, last_hidden_state)
         return cls_output
 
     def _encode_without_pool(self, encoder, token_ids, mask, token_type_ids):
@@ -234,7 +235,7 @@ class CustomBertModel(nn.Module, ABC):
         indices = torch.randperm(tail_vector.size(0))  # size(0) 是 batch_size
         temp_tail = tail_vector[indices]
         temp_tail = temp_tail
-        hr_vector = self.cross_attention(hr_vector, temp_tail,self.norm)
+        hr_vector,_ = self.cross_attention(hr_vector, temp_tail)
         return {
             'hr_vector': hr_vector,
             'tail_vector': tail_vector,
@@ -284,10 +285,15 @@ class CustomBertModel(nn.Module, ABC):
             for vector in extra_tail:
                 total_tail.append(vector)
             hr_vector, tail_vector = output_dict['hr_vector'], torch.cat(total_tail, dim=0)
+        if args.use_cross_attention:
+            indices = torch.randperm(tail_vector.size(0))
+            temp_tail = tail_vector[indices]
+            hr_vector,cross_out = self.cross_attention(hr_vector, temp_tail)
 
+        logits = hr_vector.mm(tail_vector.t())
         batch_size = hr_vector.size(0)
         labels = torch.arange(batch_size).to(hr_vector.device)
-        logits = hr_vector.mm(tail_vector.t())
+
         if self.args.test_opinion:
             logits = self.cross_attention.test(hr_vector, tail_vector)
 
@@ -306,11 +312,16 @@ class CustomBertModel(nn.Module, ABC):
             self_negative_mask = batch_dict['self_negative_mask']
             self_neg_logits.masked_fill_(~self_negative_mask, -1e4)
             logits = torch.cat([logits, self_neg_logits.unsqueeze(1)], dim=-1)
+        extra_loss = torch.tensor(0.0)
+        if args.use_special_loss and args.use_cross_attention:
+            extra_loss = nn.L1Loss(cross_out, tail_vector[0:len(hr_vector)])
         return {'logits': logits,
                 'labels': labels,
                 'inv_t': self.log_inv_t.detach().exp(),
                 'hr_vector': hr_vector.detach(),
-                'tail_vector': tail_vector.detach()}
+                'tail_vector': tail_vector.detach(),
+                'extra_loss': extra_loss
+                }
 
     def _compute_pre_batch_logits(self, hr_vector: torch.tensor,
                                   tail_vector: torch.tensor,
@@ -342,8 +353,8 @@ class CustomBertModel(nn.Module, ABC):
 def _pool_output(pooling: str,
                  cls_output: torch.tensor,
                  mask: torch.tensor,
-                 last_hidden_state: torch.tensor,
-                 norm) -> torch.tensor:
+                 last_hidden_state: torch.tensor
+                 ) -> torch.tensor:
     if pooling == 'cls':
         output_vector = cls_output
     elif pooling == 'max':
@@ -357,6 +368,5 @@ def _pool_output(pooling: str,
         output_vector = sum_embeddings / sum_mask
     else:
         assert False, 'Unknown pooling mode: {}'.format(pooling)
-
-    output_vector = norm(output_vector)
+    output_vector = nn.functional.normalize(output_vector, dim=1)
     return output_vector

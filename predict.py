@@ -74,7 +74,7 @@ class BertPredictor:
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
             if args.use_cross_attention:
-                outputs = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor,self.model.module.norm)
+                outputs,_ = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor,self.model.module.norm)
                 hr_tensor_list.append(outputs)
             else:
                 hr_tensor_list.append(outputs['hr_vector'])

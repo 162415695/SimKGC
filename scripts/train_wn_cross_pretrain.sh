@@ -30,19 +30,20 @@ python3 -u main.py \
 --model-dir "${OUTPUT_DIR}" \
 --pretrained-model /mnt/data/yhy/model/bert-base-uncased \
 --pooling mean \
---lr 1e-5 \
+--lr 3e-5 \
 --use-link-graph \
 --train-path "${DATA_DIR}/train.txt.json" \
+--warmup 0 \
 --valid-path "${DATA_DIR}/valid.txt.json" \
 --task ${TASK} \
 --neighbor-weight "${neighbor_weight}" \
 --rerank-n-hop "${rerank_n_hop}" \
---batch-size 512 \
+--batch-size 1024 \
 --print-freq 20 \
 --additive-margin 0.02 \
 --pre-batch 0 \
 --finetune-t \
---epochs 10 \
+--epochs 30 \
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
