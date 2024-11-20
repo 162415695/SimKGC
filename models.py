@@ -181,9 +181,8 @@ class CustomBertModel(nn.Module, ABC):
         if args.use_cross_attention:
             indices = torch.randperm(tail_vector.size(0))
             temp_tail = tail_vector[indices]
-            hr_vector_ori=hr_vector
-            hr_vector = self.cross_attention(hr_vector, temp_tail)
-            logits = (1-self.alpha)*hr_vector.mm(tail_vector.t())+self.alpha*hr_vector_ori.mm(tail_vector.t())
+            hr_vector_new = self.cross_attention(hr_vector, temp_tail)
+            logits = (1-self.alpha)*hr_vector.mm(tail_vector.t())+self.alpha*hr_vector_new.mm(tail_vector.t())
         else:
             logits = hr_vector.mm(tail_vector.t())
         batch_size = hr_vector.size(0)
@@ -206,7 +205,7 @@ class CustomBertModel(nn.Module, ABC):
             logits = torch.cat([logits, self_neg_logits.unsqueeze(1)], dim=-1)
         extra_loss = torch.tensor(0.0)
         if args.use_special_loss and args.use_cross_attention:
-            extra_loss = self.l1(hr_vector, tail_vector[0:len(hr_vector)])
+            extra_loss = self.l1(hr_vector_new, tail_vector[0:len(hr_vector)])
         return {'logits': logits,
                 'labels': labels,
                 'inv_t': self.log_inv_t.detach().exp(),
@@ -216,10 +215,10 @@ class CustomBertModel(nn.Module, ABC):
                 }
     @torch.no_grad
     def compute_score(self,hr_vector,tail_vector):
-        hr_vector_ori = hr_vector
-        hr_vector=self.cross_attention(hr_vector,tail_vector)
-        logits = (1 - self.alpha) * hr_vector.mm(tail_vector.t()) + self.alpha * hr_vector_ori.mm(tail_vector.t())
+        hr_vector_new = self.cross_attention(hr_vector, tail_vector)
+        logits = (1 - self.alpha) * hr_vector.mm(tail_vector.t()) + self.alpha * hr_vector_new.mm(tail_vector.t())
         return logits
+
     def _compute_pre_batch_logits(self, hr_vector: torch.tensor,
                                   tail_vector: torch.tensor,
                                   batch_dict: dict) -> torch.tensor:
