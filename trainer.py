@@ -232,12 +232,12 @@ class Trainer:
         }, filename=filename)
         delete_old_ckt(path_pattern='{}/checkpoint_*.mdl'.format(self.args.model_dir),
                        keep=self.args.max_to_keep)
-        # metric_dict = self.eval_epoch(filename)
         metric_dict = self.eval_entity(epoch)
         is_best = self.best_metric is None or (metric_dict['hit@1'] > self.best_metric['hit@1'])
         if is_best:
             self.best_metric = metric_dict
         copy_checkpoint(filename, is_best)
+
 
     @torch.no_grad()
     def eval_entity(self, epoch) -> Dict:
@@ -250,69 +250,6 @@ class Trainer:
         logger.info('Averaged metrics: {}'.format(metrics))
         _convert_is_test_2_false()
         return metrics
-
-    @torch.no_grad()
-    def eval_epoch(self, epoch) -> Dict:
-        if not self.valid_loader:
-            return {}
-
-        losses = AverageMeter('Loss', ':.4')
-        top1 = AverageMeter('Acc@1', ':6.2f')
-        top3 = AverageMeter('Acc@3', ':6.2f')
-        total_valid_batch = {i: k for i, k in enumerate(self.valid_loader)}
-        model = get_model_obj(self.model)
-        candidate_index = [ind for ind in range(len(self.valid_loader))]
-        self.model.eval()
-        total_tail_id = []
-        tail_vector = []
-        with torch.no_grad():
-            for temp_index in candidate_index:
-                indices_to_remove = []
-                temp_data = total_valid_batch[temp_index].copy()
-                for f in range(len(temp_data['batch_data'])):
-                    if temp_data['batch_data'][f].tail_id in total_tail_id:
-                        indices_to_remove.append(f)
-                    else:
-                        total_tail_id.append(temp_data['batch_data'][f].tail_id)
-                for key in temp_data:
-                    temp_data[key] = np.delete(temp_data[key], indices_to_remove, axis=0)
-                temp_data = move_to_cuda(temp_data)
-                tail_vector.append(model._encode(model.tail_bert,
-                                                 token_ids=temp_data['tail_token_ids'],
-                                                 mask=temp_data['tail_mask'],
-                                                 token_type_ids=temp_data['tail_token_type_ids']
-                                                 ))
-        for i, batch_dict in total_valid_batch.items():
-            batch_size = len(batch_dict['batch_data'])
-            if torch.cuda.is_available():
-                tail_vector = move_to_cuda(tail_vector)
-                batch_dict = move_to_cuda(batch_dict)
-            if self.args.use_amp:
-                with torch.cuda.amp.autocast():
-                    outputs = self.model(**batch_dict)
-            else:
-                outputs = self.model(**batch_dict)
-            outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
-                                           extra_tail=tail_vector)
-            outputs = ModelOutput(**outputs)
-
-            logits, labels = outputs.logits, outputs.labels
-            loss1 = self.criterion(logits, labels)
-            loss3 = self.criterion(logits[:, :batch_size].t(), labels)
-            loss = loss1 + loss3
-            if self.args.use_special_loss:
-                loss += outputs.extra_loss
-            losses.update(loss.item(), batch_size)
-
-            acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
-            top1.update(acc1.item(), batch_size)
-            top3.update(acc3.item(), batch_size)
-
-        metric_dict = {'Acc@1': round(top1.avg, 3),
-                       'Acc@3': round(top3.avg, 3),
-                       'loss': round(losses.avg, 3)}
-        logger.info('Epoch {}, valid metric: {}'.format(epoch, json.dumps(metric_dict)))
-        return metric_dict
 
     def reset_learning_rate(self, total_steps):
         # 重置优化器的学习率
@@ -430,7 +367,7 @@ class Trainer:
             top1.update(acc1.item(), batch_size)
             top3.update(acc3.item(), batch_size)
             inv_t.update(outputs.inv_t, 1)
-            alpha.update(self.model.module.cross_attention.alpha.item(),1)
+            alpha.update(self.model.module.alpha.item(),1)
             losses.update(loss.item(), batch_size)
 
             # compute gradient and do SGD step
@@ -504,55 +441,9 @@ class Trainer:
             if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
-            if self.args.use_cross_attention:
-                outputs,_ = self.model.module.cross_attention(outputs['hr_vector'], entities_tensor)
-                hr_tensor_list.append(outputs)
-            else:
-                hr_tensor_list.append(outputs['hr_vector'])
-        return torch.cat(hr_tensor_list, dim=0)
-
-    @torch.no_grad()
-    def predict_by_examples_new(self, all_entity_exs, valid_examples):
-        # get all entity encode without pool
-        examples = []
-        for entity_ex in all_entity_exs:
-            examples.append(Example(head_id='', relation='',
-                                    tail_id=entity_ex.entity_id))
-        data_loader = torch.utils.data.DataLoader(
-            Dataset(path='', examples=examples, task=self.args.task),
-            num_workers=2,
-            batch_size=max(self.args.batch_size, 1024),
-            collate_fn=collate,
-            shuffle=False)
-
-        ent_tensor_list = []
-        for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
-            batch_dict['only_ent_embedding'] = True
-            if torch.cuda.is_available():
-                batch_dict = move_to_cuda(batch_dict)
-            outputs = self.model(**batch_dict)
-            ent_tensor_list.append(outputs['ent_vectors'])
-
-        self.model.module.total_tail = torch.cat(ent_tensor_list, dim=0).cpu()
-        del ent_tensor_list
-        torch.cuda.empty_cache()
-
-        # get valid examples encode with cross attention
-        data_loader = torch.utils.data.DataLoader(
-            Dataset(path='', examples=valid_examples, task=self.args.task),
-            num_workers=1,
-            batch_size=len(valid_examples),
-            collate_fn=collate,
-            shuffle=False)
-
-        hr_tensor_list = []
-        for idx, batch_dict in enumerate(data_loader):
-            if torch.cuda.is_available():
-                batch_dict = move_to_cuda(batch_dict)
-            outputs = self.model.module.eval_forward(**batch_dict)
             hr_tensor_list.append(outputs['hr_vector'])
-            torch.cuda.empty_cache()
         return torch.cat(hr_tensor_list, dim=0)
+
 
     @torch.no_grad()
     def predict_by_entities(self, entity_exs) -> torch.tensor:
@@ -598,7 +489,8 @@ class Trainer:
         topk_scores, topk_indices, metrics, ranks = compute_metrics(hr_tensor=hr_tensor,
                                                                     entities_tensor=entity_tensor,
                                                                     target=target, examples=examples,
-                                                                    batch_size=batch_size)
+                                                                    batch_size=batch_size,
+                                                                    model=self.model.module)
         eval_dir = 'forward' if eval_forward else 'backward'
         logger.info('{} metrics: {}'.format(eval_dir, json.dumps(metrics)))
         logger.info('Evaluation takes {} seconds'.format(round(time() - start_time, 3)))

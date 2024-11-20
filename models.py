@@ -15,6 +15,19 @@ def build_model(args) -> nn.Module:
     return CustomBertModel(args)
 
 
+class CustomL1Loss(nn.Module):
+    def __init__(self):
+        super(CustomL1Loss, self).__init__()
+
+    def forward(self, input, target):
+        # 计算L1损失
+        l1_loss = torch.abs(input - target)
+        sum_result = torch.sum(l1_loss, dim=1)
+        # 对求和的结果取均值（mean）
+        mean_result = torch.mean(sum_result)
+        return mean_result
+
+
 @dataclass
 class ModelOutput:
     logits: torch.tensor
@@ -40,7 +53,7 @@ class CrossAttention(nn.Module):
         nn.init.kaiming_uniform_(self.proj_q1.weight, nonlinearity='relu')
         nn.init.kaiming_uniform_(self.proj_k2.weight, nonlinearity='relu')
         nn.init.kaiming_uniform_(self.proj_v2.weight, nonlinearity='relu')
-        self.alpha = torch.nn.Parameter(torch.tensor(0.5))
+
 
     def forward(self, x1, x2):
         batch_size, in_dim1 = x1.size()
@@ -52,86 +65,20 @@ class CrossAttention(nn.Module):
         # 计算 k2
         k2 = self.proj_k2(x2).view(x2.size(0), self.num_heads, self.k_dim).permute(1, 2,
                                                                                    0)  # num_head, dim, batch_size_B
+
         #k2 = nn.functional.normalize(k2, dim=1)
         v2 = self.proj_v2(x2).view(x2.size(0), self.num_heads, self.v_dim).permute(1, 0,
                                                                                    2)  # num_head, batch_size_B, dim
         #v2 = nn.functional.normalize(v2, dim=1)
-        attn = torch.matmul(q1, k2) / self.k_dim ** 0.5  # num_head, batch_size_A, batch_size_B
+        attn = torch.matmul(q1, k2)  # num_head, batch_size_A, batch_size_B
+        attn *= 20
         attn = torch.softmax(attn, dim=-1)
         output = torch.matmul(attn, v2).permute(1, 0, 2).contiguous().view(x1.size(0),
                                                                            -1)  # num_head, batch_size_A, dim -> batch_size_A, num_head, dim -> batch_size_A, num_head*dim
         output_temp = self.proj_o(output)
         # output = output.to(torch.float32)
         output = nn.functional.normalize(output_temp, dim=1)
-        new_output = nn.functional.normalize(self.alpha * x1 + (1 - self.alpha) * output, dim=1)
-        return new_output,output
-
-    def eval_forward(self, x1, x2, tail_mask=None):
-        batch_size, in_dim1 = x1.size()
-
-        # 计算 q1
-        q1 = self.proj_q1(x1).view(batch_size, self.num_heads, self.k_dim).permute(1, 0, 2)
-
-        # 计算 num_batches
-        num_batches = (x2.shape[0] + batch_size - 1) // batch_size
-        total_k2 = []
-        total_v2 = []
-        for i in range(num_batches):
-            start_idx = i * batch_size
-            end_idx = min(start_idx + batch_size, x2.shape[0])  # 确保不越界
-
-            # 处理当前 batch 的 x2
-            x2_current = x2[start_idx:end_idx]
-            # 计算 k2
-            k2_temp = self.proj_k2(x2_current).view(x2_current.size(0), self.num_heads, self.k_dim)
-            v2_temp = self.proj_v2(x2_current).view(x2_current.size(0), self.num_heads, self.v_dim)
-            total_v2.append(v2_temp)
-            total_k2.append(k2_temp)
-        k2 = torch.cat(total_k2, dim=0).permute(1, 2, 0)
-        v2 = torch.cat(total_v2, dim=0).permute(1, 0, 2)
-        attn = torch.matmul(q1, k2) / self.k_dim ** 0.5
-        attn = F.softmax(attn, dim=-1)
-        output = torch.matmul(attn, v2).permute(1, 0, 2).contiguous().view(x1.size(0), -1)
-        output = self.proj_o(output)
-        # output = output.to(torch.float32)
-
         return output
-
-
-class CrossAttentionSimple(nn.Module):
-    def __init__(self, in_dim1, in_dim2, dim):
-        super(CrossAttentionSimple, self).__init__()
-        self.dim = dim
-        self.proj_q1 = nn.Linear(in_dim1, dim, bias=False)
-        self.proj_k2 = nn.Linear(in_dim2, dim, bias=False)
-        self.proj_v2 = nn.Linear(in_dim2, dim, bias=False)
-        self.proj_o = nn.Linear(dim, in_dim1)
-
-    def forward(self, x1, x2):
-        batch_size, in_dim1 = x1.size()
-        # 计算 q1
-        q1 = nn.functional.normalize(self.proj_q1(x1), dim=1)  # batch_size_A, dim
-        # 计算 num_batches
-        # 计算 k2
-        k2 = nn.functional.normalize(self.proj_k2(x2).permute(1, 0), dim=1)  # dim, batch_size_B
-        # 计算 v2
-        v2 = nn.functional.normalize(self.proj_v2(x2), dim=1)  # batch_size_B, dim
-        attn = torch.matmul(q1, k2)  # batch_size_A, batch_size_B
-        attn = nn.functional.normalize(attn, dim=1)
-        output = torch.matmul(attn, v2)  # batch_size_A, dim
-        output = nn.functional.normalize(self.proj_o(output), dim=1)
-
-        return output
-
-    def test(self, x1, x2):
-        q1 = nn.functional.normalize(self.proj_q1(x1), dim=1)  # batch_size_A, dim
-        # 计算 num_batches
-        # 计算 k2
-        k2 = nn.functional.normalize(self.proj_k2(x2).permute(1, 0), dim=1)  # dim, batch_size_B
-        # 计算 v2
-        v2 = self.proj_v2(x2)  # batch_size_B, dim
-        attn = torch.matmul(q1, k2)  # batch_size_A, batch_size_B
-        return attn
 
 
 class CustomBertModel(nn.Module, ABC):
@@ -155,6 +102,8 @@ class CustomBertModel(nn.Module, ABC):
         self.cross_attention = CrossAttention(768, 768, 768, 768, 4)
         self.total_tail = None
         self.total_tail_mask = None
+        self.l1 = CustomL1Loss()
+        self.alpha = torch.nn.Parameter(torch.tensor(0.9), requires_grad=True)
         if self.args.pretrained_ckpt:
             for param in self.tail_bert.parameters():
                 param.requires_grad = False
@@ -172,14 +121,6 @@ class CustomBertModel(nn.Module, ABC):
         cls_output = _pool_output(self.args.pooling, cls_output, mask, last_hidden_state)
         return cls_output
 
-    def _encode_without_pool(self, encoder, token_ids, mask, token_type_ids):
-        outputs = encoder(input_ids=token_ids,
-                          attention_mask=mask,
-                          token_type_ids=token_type_ids,
-                          return_dict=True)
-        last_hidden_state = outputs.last_hidden_state
-        cls_output = last_hidden_state
-        return cls_output
 
     def forward(self, hr_token_ids, hr_mask, hr_token_type_ids,
                 tail_token_ids, tail_mask, tail_token_type_ids,
@@ -229,54 +170,6 @@ class CustomBertModel(nn.Module, ABC):
             'head_vector': head_vector,
         }
 
-    def forward_cross_attention(self, hr_vector, tail_vector, head_vector=None) -> dict:
-        # print(hr_vector.shape, tail_vector.shape, head_vector.shape)
-        assert hr_vector.size(0) == self.batch_size
-        indices = torch.randperm(tail_vector.size(0))  # size(0) 是 batch_size
-        temp_tail = tail_vector[indices]
-        temp_tail = temp_tail
-        hr_vector,_ = self.cross_attention(hr_vector, temp_tail)
-        return {
-            'hr_vector': hr_vector,
-            'tail_vector': tail_vector,
-            'head_vector': head_vector,
-        }
-
-    def eval_forward(self, hr_token_ids, hr_mask, hr_token_type_ids,
-                     tail_token_ids, tail_mask, tail_token_type_ids,
-                     head_token_ids, head_mask, head_token_type_ids,
-                     rel_token_ids, rel_mask, rel_token_type_ids,
-                     only_ent_embedding=False, **kwargs) -> dict:
-        # tail_vector = self._encode(self.tail_bert,
-        #                            token_ids=tail_token_ids,
-        #                            mask=tail_mask,
-        #                            token_type_ids=tail_token_type_ids)
-        # head_vector = self._encode(self.tail_bert,
-        #                            token_ids=head_token_ids,
-        #                            mask=head_mask,
-        #                            token_type_ids=head_token_type_ids)
-
-        # logger.info('rel_vector dtype: {}, head_vector dtype: {}'.format(rel_vector.dtype, head_vector.dtype))
-        temp_hr = self._encode(self.hr_bert,
-                               token_ids=hr_token_ids,
-                               mask=hr_mask,
-                               token_type_ids=hr_token_type_ids)
-        # temp_tail = self._encode_without_pool(self.tail_bert,
-        #                        token_ids=tail_token_ids,
-        #                        mask=tail_mask,
-        #                        token_type_ids=tail_token_type_ids)
-        # indices = torch.randperm(temp_tail.size(0))  # size(0) 是 1024
-        # # 使用生成的随机索引打乱张量
-        # temp_tail = temp_tail[indices]
-        self.total_tail = self.total_tail.to(temp_hr.device)
-        hr_vector = self.cross_attention.eval_forward(temp_hr, self.total_tail)
-        self.total_tail = self.total_tail.cpu()
-        return {
-            'hr_vector': hr_vector,
-            # 'tail_vector': tail_vector,
-            # 'head_vector': head_vector,
-        }
-
     def compute_logits(self, output_dict: dict, batch_dict: dict, extra_tail=None) -> dict:
         if len(extra_tail) == 0:
             hr_vector, tail_vector = output_dict['hr_vector'], output_dict['tail_vector']
@@ -288,12 +181,13 @@ class CustomBertModel(nn.Module, ABC):
         if args.use_cross_attention:
             indices = torch.randperm(tail_vector.size(0))
             temp_tail = tail_vector[indices]
-            hr_vector,cross_out = self.cross_attention(hr_vector, temp_tail)
-
-        logits = hr_vector.mm(tail_vector.t())
+            hr_vector_ori=hr_vector
+            hr_vector = self.cross_attention(hr_vector, temp_tail)
+            logits = (1-self.alpha)*hr_vector.mm(tail_vector.t())+self.alpha*hr_vector_ori.mm(tail_vector.t())
+        else:
+            logits = hr_vector.mm(tail_vector.t())
         batch_size = hr_vector.size(0)
         labels = torch.arange(batch_size).to(hr_vector.device)
-
         if self.args.test_opinion:
             logits = self.cross_attention.test(hr_vector, tail_vector)
 
@@ -314,7 +208,7 @@ class CustomBertModel(nn.Module, ABC):
             logits = torch.cat([logits, self_neg_logits.unsqueeze(1)], dim=-1)
         extra_loss = torch.tensor(0.0)
         if args.use_special_loss and args.use_cross_attention:
-            extra_loss = nn.L1Loss(cross_out, tail_vector[0:len(hr_vector)])
+            extra_loss = self.l1(hr_vector, tail_vector[0:len(hr_vector)])
         return {'logits': logits,
                 'labels': labels,
                 'inv_t': self.log_inv_t.detach().exp(),
@@ -322,7 +216,12 @@ class CustomBertModel(nn.Module, ABC):
                 'tail_vector': tail_vector.detach(),
                 'extra_loss': extra_loss
                 }
-
+    @torch.no_grad
+    def compute_score(self,hr_vector,tail_vector):
+        hr_vector_ori = hr_vector
+        hr_vector=self.cross_attention(hr_vector,tail_vector)
+        logits = (1 - self.alpha) * hr_vector.mm(tail_vector.t()) + self.alpha * hr_vector_ori.mm(tail_vector.t())
+        return logits
     def _compute_pre_batch_logits(self, hr_vector: torch.tensor,
                                   tail_vector: torch.tensor,
                                   batch_dict: dict) -> torch.tensor:

@@ -15,6 +15,7 @@ from rerank import rerank_by_graph
 from logger_config import logger
 
 
+
 def _setup_entity_dict() -> EntityDict:
     if args.task == 'wiki5m_ind':
         return EntityDict(entity_dict_dir=os.path.dirname(args.valid_path),
@@ -43,6 +44,7 @@ def compute_metrics(hr_tensor: torch.tensor,
                     entities_tensor: torch.tensor,
                     target: List[int],
                     examples: List[Example],
+                    model,
                     k=3, batch_size=256) -> Tuple:
     assert hr_tensor.size(1) == entities_tensor.size(1)
     total = hr_tensor.size(0)
@@ -57,7 +59,10 @@ def compute_metrics(hr_tensor: torch.tensor,
     for start in tqdm.tqdm(range(0, total, batch_size)):
         end = start + batch_size
         # batch_size * entity_cnt
-        batch_score = torch.mm(hr_tensor[start:end, :], entities_tensor.t())
+        if args.use_cross_attention:
+            batch_score = model.compute_score(hr_tensor[start:end, :], entities_tensor)
+        else:
+            batch_score = torch.mm(hr_tensor[start:end, :], entities_tensor.t())
         assert entity_cnt == batch_score.size(1)
         batch_target = target[start:end]
 
@@ -135,13 +140,13 @@ def eval_single_direction(predictor: BertPredictor,
                           batch_size=256) -> dict:
     start_time = time()
     examples = load_data(args.valid_path, add_forward_triplet=eval_forward, add_backward_triplet=not eval_forward)
-    hr_tensor = predictor.predict_by_examples(examples,entity_tensor)
+    hr_tensor,model = predictor.predict_by_examples(examples,entity_tensor)
     hr_tensor = hr_tensor.to(entity_tensor.device)
     target = [entity_dict.entity_to_idx(ex.tail_id) for ex in examples]
     logger.info('predict tensor done, compute metrics...')
     topk_scores, topk_indices, metrics, ranks = compute_metrics(hr_tensor=hr_tensor, entities_tensor=entity_tensor,
                                                                 target=target, examples=examples,
-                                                                batch_size=batch_size)
+                                                                batch_size=batch_size,model=model)
     eval_dir = 'forward' if eval_forward else 'backward'
     logger.info('{} metrics: {}'.format(eval_dir, json.dumps(metrics)))
 

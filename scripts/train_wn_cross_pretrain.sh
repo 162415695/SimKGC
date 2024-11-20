@@ -33,7 +33,6 @@ python3 -u main.py \
 --lr 3e-5 \
 --use-link-graph \
 --train-path "${DATA_DIR}/train.txt.json" \
---warmup 0 \
 --valid-path "${DATA_DIR}/valid.txt.json" \
 --task ${TASK} \
 --neighbor-weight "${neighbor_weight}" \
@@ -48,4 +47,5 @@ python3 -u main.py \
 --workers 4 \
 --max-to-keep 5 \
 --use-cross-attention \
+--use-special-loss \
 --pretrained-ckpt /mnt/data/yhy/projects/SimKGC/checkpoint/WN18RR_bert_base_best/model_last.mdl "$@"
