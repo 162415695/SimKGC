@@ -188,8 +188,6 @@ class CustomBertModel(nn.Module, ABC):
             logits = hr_vector.mm(tail_vector.t())
         batch_size = hr_vector.size(0)
         labels = torch.arange(batch_size).to(hr_vector.device)
-        if self.args.test_opinion:
-            logits = self.cross_attention.test(hr_vector, tail_vector)
 
         if self.training:
             logits -= torch.zeros(logits.size()).fill_diagonal_(self.add_margin).to(logits.device)
