@@ -5,7 +5,6 @@ import torch
 from time import time
 from typing import List, Tuple
 from dataclasses import dataclass, asdict
-
 from config import args
 from doc import load_data, Example
 from predict import BertPredictor
@@ -45,7 +44,7 @@ def compute_metrics(hr_tensor: torch.tensor,
                     target: List[int],
                     examples: List[Example],
                     model,
-                    k=3, batch_size=256) -> Tuple:
+                    k=3, batch_size=1024) -> Tuple:
     assert hr_tensor.size(1) == entities_tensor.size(1)
     total = hr_tensor.size(0)
     entity_cnt = len(entity_dict)
@@ -115,6 +114,7 @@ def predict_by_split():
 
     predictor = BertPredictor()
     predictor.load(ckt_path=args.eval_model_path)
+
     entity_tensor = predictor.predict_by_entities(entity_dict.entity_exs)
 
     forward_metrics = eval_single_direction(predictor,
@@ -137,7 +137,7 @@ def predict_by_split():
 def eval_single_direction(predictor: BertPredictor,
                           entity_tensor: torch.tensor,
                           eval_forward=True,
-                          batch_size=256) -> dict:
+                          batch_size=1024) -> dict:
     start_time = time()
     examples = load_data(args.valid_path, add_forward_triplet=eval_forward, add_backward_triplet=not eval_forward)
     hr_tensor,model = predictor.predict_by_examples(examples,entity_tensor)

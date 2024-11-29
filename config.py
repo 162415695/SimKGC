@@ -94,6 +94,8 @@ parser.add_argument('--use-special-loss', default=False, action='store_true',
                     help='random extra loss function')
 parser.add_argument('--use-cross-attention', default=False, action='store_true',
                     help='')
+parser.add_argument('--use-lora',default=False, action='store_true',
+                    help='use lora for hr_bert and tail_bert')
 
 args = parser.parse_args()
 if not args.skip:

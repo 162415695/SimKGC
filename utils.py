@@ -9,6 +9,7 @@ import random
 from logger_config import logger
 
 
+
 class AttrDict:
     pass
 

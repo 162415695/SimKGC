@@ -163,10 +163,18 @@ class Trainer:
         self.criterion = nn.CrossEntropyLoss(reduction='mean').cuda()
         # self.criterion2 = SigmoidBCELoss(reduction='mean').cuda()
         self.criterion2 = nn.BCEWithLogitsLoss(reduction='mean').cuda()
-
+        '''
+        self.optimizer = AdamW([
+            {'params': [p for p in self.model.parameters() if p.requires_grad and p not in self.model.module.alpha],
+             'lr': args.lr},  # fc1层的学习率
+            {'params': [p for p in self.model.parameters() if p in self.model.module.alpha], 'lr': args.lr * 10}
+            # 其他层的学习率
+        ], lr=args.lr, weight_decay=args.weight_decay)
+        '''
         self.optimizer = AdamW([p for p in self.model.parameters() if p.requires_grad],
                                lr=args.lr,
                                weight_decay=args.weight_decay)
+
         report_num_trainable_parameters(self.model)
 
         train_dataset = Dataset(path=args.train_path, task=args.task)
@@ -205,8 +213,8 @@ class Trainer:
         if self.args.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
         epoch = 0
-        if self.args.pretrained_ckpt:
-            self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
+
+        #self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
         while epoch < self.args.epochs:
             # train for one epoch
             extra_flag = self.train_epoch(epoch)
@@ -237,7 +245,6 @@ class Trainer:
         if is_best:
             self.best_metric = metric_dict
         copy_checkpoint(filename, is_best)
-
 
     @torch.no_grad()
     def eval_entity(self, epoch) -> Dict:
@@ -331,9 +338,11 @@ class Trainer:
                                                          mask=temp_data['tail_mask'],
                                                          token_type_ids=temp_data['tail_token_type_ids']
                                                          ))
+            '''
             if len(candidate_index) > 0:
                 batch_dict['triplet_mask'] = construct_mask_extra_batch([ex for ex in batch_dict['batch_data']].copy(),
                                                                         total_tail_id.copy())
+            '''
             if self.args.add_hop_mask > 0:
                 temp_mask = construct_n_hop_mask(total_head_id, total_tail_id, n_hop=self.args.add_hop_mask)
                 batch_dict['triplet_mask'] = batch_dict['triplet_mask'] & temp_mask
@@ -361,18 +370,17 @@ class Trainer:
             loss1 = self.criterion(logits, labels)
             loss3 = self.criterion(logits[:, :batch_size].t(), labels)
             loss = loss1 + loss3
-            if self.args.use_special_loss:
-                loss += outputs.extra_loss
+
             acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
             top1.update(acc1.item(), batch_size)
             top3.update(acc3.item(), batch_size)
             inv_t.update(outputs.inv_t, 1)
-            alpha.update(self.model.module.alpha.item(),1)
+            alpha.update(self.model.module.alpha.item(), 1)
             losses.update(loss.item(), batch_size)
-
             # compute gradient and do SGD step
             self.optimizer.zero_grad()
             if self.args.use_amp:
+
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
@@ -444,7 +452,6 @@ class Trainer:
             hr_tensor_list.append(outputs['hr_vector'])
         return torch.cat(hr_tensor_list, dim=0)
 
-
     @torch.no_grad()
     def predict_by_entities(self, entity_exs) -> torch.tensor:
         examples = []
@@ -473,7 +480,7 @@ class Trainer:
     def eval_single_direction(self,
                               entity_tensor: torch.tensor,
                               eval_forward=True,
-                              batch_size=256) -> dict:
+                              batch_size=1024) -> dict:
         start_time = time()
         examples = load_data(self.args.valid_path, add_forward_triplet=eval_forward,
                              add_backward_triplet=not eval_forward)

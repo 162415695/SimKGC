@@ -9,7 +9,7 @@ DIR="$( cd "$( dirname "$0" )" && cd .. && pwd )"
 echo "working directory: ${DIR}"
 
 if [ -z "$OUTPUT_DIR" ]; then
-  OUTPUT_DIR="${DIR}/checkpoint/${TASK}_trans_pretrain"
+  OUTPUT_DIR="${DIR}/checkpoint/${TASK}_lora"
 fi
 if [ -z "$DATA_DIR" ]; then
   DATA_DIR="${DIR}/data/${TASK}"
@@ -47,5 +47,4 @@ python3 -u main.py \
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
---pretrained-ckpt /mnt/data/yhy/projects/SimKGC_git/checkpoint/WN18RR_bert_base_best/model_last.mdl \
---use-cross-attention  "$@"
+--  "$@"
