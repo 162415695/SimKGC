@@ -255,6 +255,7 @@ class Trainer:
             self.best_metric = metric_dict
         copy_checkpoint(filename, is_best)
 
+
     @torch.no_grad()
     def eval_entity(self, epoch) -> Dict:
         self.model.eval()

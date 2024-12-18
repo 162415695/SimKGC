@@ -88,91 +88,29 @@ class CrossAttention(nn.Module):
         nn.init.kaiming_uniform_(self.proj_k2.weight, nonlinearity='relu')
         nn.init.kaiming_uniform_(self.proj_v2.weight, nonlinearity='relu')
 
-    def forward(self, x1, x2, invt=20, test_mode=False):
+
+    def forward(self, x1, x2):
         batch_size, in_dim1 = x1.size()
         # 计算 q1
         q1 = self.proj_q1(x1).view(batch_size, self.num_heads, self.k_dim).permute(1, 0,
                                                                                    2)  # num_head, batch_size_A, dim
+
+        #q1 = nn.functional.normalize(q1, dim=1)  # 计算 num_batches
+        # 计算 k2
         k2 = self.proj_k2(x2).view(x2.size(0), self.num_heads, self.k_dim).permute(1, 2,
                                                                                    0)  # num_head, dim, batch_size_B
+
+        #k2 = nn.functional.normalize(k2, dim=1)
         v2 = self.proj_v2(x2).view(x2.size(0), self.num_heads, self.v_dim).permute(1, 0,
                                                                                    2)  # num_head, batch_size_B, dim
-        global attn_max, total_step, attn_max2
-        if test_mode:
-            total_step = 0
-            attn_max = 0
-            attn_max2 = 0
-        # 按照每个头进行独立的注意力计算
-        head_outputs = []
-        for i in range(self.num_heads):
-            q1_head = q1[i]  # shape: (batch_size_A, dim)
-            k2_head = k2[i]  # shape: (dim, batch_size_B)
-            v2_head = v2[i]  # shape: (batch_size_B, dim)
-            q1_head = nn.functional.normalize(q1_head, p=2, dim=1)
-
-            if test_mode:
-                k2_head = nn.functional.normalize(k2_head, p=2, dim=0)
-                # 计算注意力分数
-                attn_head = torch.matmul(q1_head, k2_head)  # shape: (batch_size_A, batch_size_B)
-                top_values, top_indices = torch.topk(attn_head, 10, dim=1)
-                result = torch.full_like(attn_head, -1e4)
-                result.scatter_(1, top_indices, top_values)
-                attn_head = result
-                '''
-                temp_index = 0
-                total_head = []
-                while temp_index * len(x1) <= len(x2):
-
-                    if (temp_index + 1) * len(x1) < len(x2):
-                        temp_k = nn.functional.normalize(k2_head[:, temp_index * len(x1):(temp_index + 1) * len(x1)],
-                                                         dim=0)
-                    else:
-                        temp_k = nn.functional.normalize(k2_head[:, temp_index * len(x1):len(x2)],
-                                                         dim=0)
-                    attn_head_temp = torch.matmul(q1_head, temp_k)  # shape: (batch_size_A, batch_size_B)
-                    top_values, top_indices = torch.topk(attn_head_temp, 10, dim=1)
-
-                    # 创建一个全为 1e-4 的张量
-                    result = torch.full_like(attn_head_temp, -1e4)
-
-                    # 使用索引将原始张量的前10个最大值复制到结果张量中
-                    result.scatter_(1, top_indices, top_values)
-                    total_head.append(result)
-                    temp_index += 1
-                attn_head = torch.cat(total_head, dim=1)
-'''
-            else:
-                # 取出每个头的 q, k, v
-                k2_head = nn.functional.normalize(k2_head, p=2, dim=0)
-                # 计算注意力分数
-                attn_head = torch.matmul(q1_head, k2_head)  # shape: (batch_size_A, batch_size_B)
-            attn_head *= invt
-            attn_max2 += torch.max(attn_head).item()
-            # 进行 softmax
-            attn_head = torch.softmax(attn_head, dim=-1)
-            attn_max += torch.max(attn_head).item()
-            # 加权求和
-            output_head = torch.matmul(attn_head, v2_head)  # shape: (batch_size_A, dim)
-            head_outputs.append(output_head)
-        total_step += 1
-        if total_step % 20 == 0:
-            logger.info("尾实体长度为" + str(len(x2)))
-            logger.info(attn_max2 / (self.num_heads * total_step))
-            logger.info(attn_max / (self.num_heads * total_step))
-            total_step = 0
-            attn_max = 0
-            attn_max2 = 0
-        elif test_mode:
-            logger.info(attn_max2 / self.num_heads)
-            logger.info(attn_max / self.num_heads)
-            total_step = 0
-            attn_max = 0
-            attn_max2 = 0
-        # 将所有头的输出拼接
-        output = torch.cat(head_outputs, dim=-1)  # shape: (batch_size_A, num_heads * dim)
-
-        # 投影回输出维度
+        #v2 = nn.functional.normalize(v2, dim=1)
+        attn = torch.matmul(q1, k2)  # num_head, batch_size_A, batch_size_B
+        attn *= 20
+        attn = torch.softmax(attn, dim=-1)
+        output = torch.matmul(attn, v2).permute(1, 0, 2).contiguous().view(x1.size(0),
+                                                                           -1)  # num_head, batch_size_A, dim -> batch_size_A, num_head, dim -> batch_size_A, num_head*dim
         output_temp = self.proj_o(output)
+        # output = output.to(torch.float32)
         output = nn.functional.normalize(output_temp, dim=1)
         return output
 
@@ -376,6 +314,8 @@ class CustomBertModel(nn.Module, ABC):
             self_neg_logits.masked_fill_(~self_negative_mask, -1e4)
             logits = torch.cat([logits, self_neg_logits.unsqueeze(1)], dim=-1)
         extra_loss = torch.tensor(0.0)
+        if args.use_special_loss and args.use_cross_attention:
+            extra_loss = self.l1(hr_vector, tail_vector[0:len(hr_vector)])
         return {'logits': logits,
                 'labels': labels,
                 'inv_t': self.log_inv_t.detach().exp(),
