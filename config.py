@@ -94,7 +94,12 @@ parser.add_argument('--use-special-loss', default=False, action='store_true',
                     help='random extra loss function')
 parser.add_argument('--use-cross-attention', default=False, action='store_true',
                     help='')
-
+parser.add_argument('--use-lora',default=False, action='store_true',
+                    help='use lora for hr_bert and tail_bert')
+parser.add_argument('--use-moe',default=False, action='store_true',
+                    help='use moe for hr_bert and tail_bert')
+parser.add_argument('--add-discriminator',default=False, action='store_true',
+                    help='add extra tail discriminator')
 args = parser.parse_args()
 if not args.skip:
     assert not args.train_path or os.path.exists(args.train_path)

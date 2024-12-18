@@ -18,12 +18,13 @@ from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_wi
 from transformers import AdamW
 from copy import deepcopy
 from typing import List, Tuple
-from evaluate import entity_dict, compute_metrics, PredInfo, _setup_entity_dict
-from doc import Dataset, collate, _convert_is_test_2_true, _convert_is_test_2_false, load_data, Example
+from evaluate import entity_dict, compute_metrics, PredInfo, _setup_entity_dict, compute_metrics1
+from doc import Dataset, collate, _convert_is_test_2_true, _convert_is_test_2_false, load_data, Example, \
+    _concat_name_desc
 from utils import AverageMeter, ProgressMeter
 from utils import save_checkpoint, delete_old_ckt, report_num_trainable_parameters, move_to_cuda, get_model_obj, \
     concatenate_dict_arrays, generate_random_numbers, copy_checkpoint
-from metric import accuracy
+from metric import accuracy, new_accuracy
 from models import build_model, ModelOutput
 from dict_hub import build_tokenizer
 from logger_config import logger
@@ -136,6 +137,7 @@ class SparsemaxBCELoss(nn.Module):
 class Trainer:
 
     def __init__(self, args, ngpus_per_node):
+
         self.args = args
         self.ngpus_per_node = ngpus_per_node
         build_tokenizer(args)
@@ -150,8 +152,9 @@ class Trainer:
                     self.model.cuda()
                     self.use_cuda = True
                 logger.info('Load model from {} successfully'.format(args.pretrained_ckpt))
-            except:
+            except Exception as e:
                 logger.info("读取失败")
+                logger.info(e)
         logger.info(self.model)
         self._setup_training()
         if not args.add_extra_batch:
@@ -162,11 +165,25 @@ class Trainer:
         # define loss function (criterion) and optimizer
         self.criterion = nn.CrossEntropyLoss(reduction='mean').cuda()
         # self.criterion2 = SigmoidBCELoss(reduction='mean').cuda()
-        self.criterion2 = nn.BCEWithLogitsLoss(reduction='mean').cuda()
+        self.criterion2 =  nn.BCEWithLogitsLoss(reduction='mean').cuda()
+        tail_bert_params = {id(param): param for param in self.model.module.tail_bert.parameters() if
+                            param.requires_grad}
 
+        # 然后，从model的所有参数中排除tail_bert的参数
+        params = [p for p in self.model.parameters() if p.requires_grad and id(p) not in tail_bert_params]
+        '''
+        self.optimizer = AdamW([
+            {'params': params,
+             'lr': args.lr},  # fc1层的学习率
+            {'params': tail_bert_params.values(), 'lr': args.lr /(1+args.extra_batch_limit)}
+            # 其他层的学习率
+        ], lr=args.lr, weight_decay=args.weight_decay)
+        print(self.optimizer)
+        '''
         self.optimizer = AdamW([p for p in self.model.parameters() if p.requires_grad],
                                lr=args.lr,
                                weight_decay=args.weight_decay)
+
         report_num_trainable_parameters(self.model)
 
         train_dataset = Dataset(path=args.train_path, task=args.task)
@@ -205,8 +222,8 @@ class Trainer:
         if self.args.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
         epoch = 0
-        if self.args.pretrained_ckpt:
-            self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
+
+        #self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
         while epoch < self.args.epochs:
             # train for one epoch
             extra_flag = self.train_epoch(epoch)
@@ -237,7 +254,6 @@ class Trainer:
         if is_best:
             self.best_metric = metric_dict
         copy_checkpoint(filename, is_best)
-
 
     @torch.no_grad()
     def eval_entity(self, epoch) -> Dict:
@@ -280,19 +296,28 @@ class Trainer:
 
     def train_epoch(self, epoch):
 
-        losses = AverageMeter('Loss', ':.4')
-        top1 = AverageMeter('Acc@1', ':6.2f')
-        top3 = AverageMeter('Acc@3', ':6.2f')
-        inv_t = AverageMeter('InvT', ':6.2f')
-        alpha = AverageMeter('alpha', ':.4')
+
         if self.extra_flag:
             prefix = "Epoch: [{}],extra_batch:[{}]".format(epoch, self.extra_batch_size)
         else:
             prefix = "Epoch: [{}]".format(epoch)
+        losses = AverageMeter('Loss', ':.4')
+        top1 = AverageMeter('Acc@1', ':6.2f')
+        top3 = AverageMeter('Acc@3', ':6.2f')
+        inv_t = AverageMeter('InvT', ':6.2f')
         progress = ProgressMeter(
             len(self.train_loader),
-            [losses, inv_t, top1, top3, alpha],
+            [losses, inv_t, top1, top3],
             prefix=prefix)
+        if self.args.add_discriminator:
+            prefix = "Epoch: [{}],discriminator: ".format(epoch)
+            losses_dis=AverageMeter('Loss', ':.4')
+            top1_dis=AverageMeter('Acc@1', ':6.2f')
+            progress_dis = ProgressMeter(
+                len(self.train_loader),
+                [losses_dis,top1_dis],
+                prefix=prefix
+            )
         total_train_batch = {i: k for i, k in enumerate(self.train_loader)}
         for i, batch_dict in total_train_batch.items():
             self.current_steps += 1
@@ -340,8 +365,10 @@ class Trainer:
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
-
-            self.model.train()
+            if self.args.pretrained_ckpt:
+                self.model.eval()
+            else:
+                self.model.train()
             batch_size = len(batch_dict['batch_data'])
             # compute output
 
@@ -361,30 +388,83 @@ class Trainer:
             loss1 = self.criterion(logits, labels)
             loss3 = self.criterion(logits[:, :batch_size].t(), labels)
             loss = loss1 + loss3
-            if self.args.use_special_loss:
-                loss += outputs.extra_loss
+            self.optimizer.zero_grad()
+            if not self.args.pretrained_ckpt:
+                if self.args.use_amp:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                    self.optimizer.step()
+
             acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
             top1.update(acc1.item(), batch_size)
             top3.update(acc3.item(), batch_size)
             inv_t.update(outputs.inv_t, 1)
-            alpha.update(self.model.module.alpha.item(),1)
             losses.update(loss.item(), batch_size)
-
-            # compute gradient and do SGD step
-            self.optimizer.zero_grad()
-            if self.args.use_amp:
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                self.optimizer.step()
-            self.scheduler.step()
+            if self.args.add_discriminator:
+                total_head=batch_dict['head_text']
+                total_rel=batch_dict['rel_text']
+                total_tail=batch_dict['tail_text']
+                topk=2
+                rand_n=2
+                top_values, top_indices = torch.topk(logits, topk, dim=1)
+                triples=[]
+                total_labels=[]
+                for piece in range(batch_size):
+                    indices = torch.randperm(topk)[:rand_n]
+                    index_array = top_indices[piece][indices]
+                    index_array = torch.cat((index_array, torch.tensor([piece]).to(index_array.device)))
+                    indices = torch.randperm(rand_n + 1)[:rand_n + 1]
+                    index_array = index_array[indices]
+                    for index in index_array:
+                        if index==batch_size:
+                            triple = ['the head is ' + total_head[piece] + ', the relation is ' + total_rel[
+                                piece], 'the predict tail is ' + total_head[piece]]
+                            triples.append(triple)
+                        else:
+                            triple=['the head is '+total_head[piece]+', the relation is '+total_rel[piece],'the predict tail is '+total_tail[index]]
+                            triples.append(triple)
+                        if piece != index:
+                            total_labels.append(0)
+                        else:
+                            total_labels.append(1)
+                mini_batch=300
+                for index in range(0, len(triples), mini_batch):
+                    if index+mini_batch > len(triples):
+                        mini_batch=len(triples)-index
+                    temp_triples=triples[index:index+mini_batch]
+                    outputs = self.model.module.discriminate(temp_triples)
+                    results=outputs
+                    labels_dis = torch.tensor(total_labels[index:index + mini_batch])
+                    labels_dis = move_to_cuda(labels_dis).to(torch.float)
+                    loss = self.criterion2(results, labels_dis)
+                    acc1_dis = new_accuracy(results, labels_dis)
+                    top1_dis.update(acc1_dis,mini_batch)
+                    losses_dis.update(loss.item(), mini_batch)
+                    # compute gradient and do SGD step
+                    self.optimizer.zero_grad()
+                    if self.args.use_amp:
+                        self.scaler.scale(loss).backward()
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                        self.optimizer.step()
+                self.scheduler.step()
+                # compute gradient and do SGD step
             if i % self.args.print_freq == 0:
-                progress.display(i)
+                if self.args.add_discriminator:
+                    progress_dis.display(i)
+                else:
+                    progress.display(i)
                 if self.extra_flag:
                     if acc1 > 98:
                         logger.info("acc1已超过98%,添加额外待预测的尾实体")
@@ -444,7 +524,6 @@ class Trainer:
             hr_tensor_list.append(outputs['hr_vector'])
         return torch.cat(hr_tensor_list, dim=0)
 
-
     @torch.no_grad()
     def predict_by_entities(self, entity_exs) -> torch.tensor:
         examples = []
@@ -473,7 +552,7 @@ class Trainer:
     def eval_single_direction(self,
                               entity_tensor: torch.tensor,
                               eval_forward=True,
-                              batch_size=256) -> dict:
+                              batch_size=1024) -> dict:
         start_time = time()
         examples = load_data(self.args.valid_path, add_forward_triplet=eval_forward,
                              add_backward_triplet=not eval_forward)
@@ -494,4 +573,25 @@ class Trainer:
         eval_dir = 'forward' if eval_forward else 'backward'
         logger.info('{} metrics: {}'.format(eval_dir, json.dumps(metrics)))
         logger.info('Evaluation takes {} seconds'.format(round(time() - start_time, 3)))
+        if self.args.add_discriminator:
+            total_head=[]
+            total_rel=[]
+            for ex in examples:
+                test_data=ex.vectorize()
+                total_head.append(test_data['head_text'])
+                total_rel.append(test_data['rel_text'])
+            total_tail=[_concat_name_desc(ex.entity,ex.entity_desc)for ex in entity_dict.entity_exs]
+            topk_scores, topk_indices, metrics, ranks = compute_metrics1(hr_tensor=hr_tensor,
+                                                                        entities_tensor=entity_tensor,
+                                                                        target=target, examples=examples,
+                                                                        batch_size=batch_size,
+                                                                        model=self.model.module,
+                                                                         total_head=total_head,
+                                                                         total_rel=total_rel,
+                                                                         total_tail=total_tail
+                                                                        )
+            logger.info('使用判别器')
+            logger.info('{} metrics: {}'.format(eval_dir, json.dumps(metrics)))
+            logger.info('Evaluation takes {} seconds'.format(round(time() - start_time, 3)))
+
         return metrics

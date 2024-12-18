@@ -44,4 +44,4 @@ python3 -u evaluate.py \
 --neighbor-weight "${neighbor_weight}" \
 --rerank-n-hop "${rerank_n_hop}" \
 --train-path "${DATA_DIR}/train.txt.json" \
---valid-path "${test_path}" "$@"
+--valid-path "${test_path}"  "$@"

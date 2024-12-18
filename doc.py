@@ -105,7 +105,8 @@ class Example:
         head_encoded_inputs = _custom_tokenize(text=head_text)
 
         tail_word = _parse_entity_name(self.tail)
-        tail_encoded_inputs = _custom_tokenize(text=_concat_name_desc(tail_word, tail_desc))
+        tail_text = _concat_name_desc(tail_word, tail_desc)
+        tail_encoded_inputs = _custom_tokenize(text=tail_text)
 
         rel_encoded_inputs=_custom_tokenize(self.relation)
         return {'hr_token_ids': hr_encoded_inputs['input_ids'],
@@ -116,6 +117,9 @@ class Example:
                 'head_token_type_ids': head_encoded_inputs['token_type_ids'],
                 'rel_token_ids': rel_encoded_inputs['input_ids'],
                 'rel_token_type_ids': rel_encoded_inputs['token_type_ids'],
+                'head_text':head_text,
+                'rel_text':self.relation,
+                'tail_text':tail_text,
                 'obj': self}
 
 
@@ -194,6 +198,9 @@ def collate(batch_data: List[dict]) -> dict:
         [torch.LongTensor(ex['rel_token_type_ids']) for ex in batch_data],
         need_mask=False
     )
+    head_text=[ex['head_text'] for ex in batch_data]
+    relation = [ex['rel_text'] for ex in batch_data]
+    tail_text = [ex['tail_text'] for ex in batch_data]
     batch_exs = [ex['obj'] for ex in batch_data]
     batch_dict = {
         'hr_token_ids': hr_token_ids,
@@ -209,6 +216,9 @@ def collate(batch_data: List[dict]) -> dict:
         'rel_mask': rel_mask,
         'rel_token_type_ids': rel_token_type_ids,
         'batch_data': batch_exs,
+        'head_text': head_text,
+        'rel_text': relation,
+        'tail_text': tail_text,
         'triplet_mask': construct_mask(row_exs=batch_exs) if not args.is_test else None,
         'self_negative_mask': construct_self_negative_mask(batch_exs) if not args.is_test else None,
     }

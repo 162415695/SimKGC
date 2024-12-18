@@ -5,7 +5,6 @@ import torch
 from time import time
 from typing import List, Tuple
 from dataclasses import dataclass, asdict
-
 from config import args
 from doc import load_data, Example
 from predict import BertPredictor
@@ -40,12 +39,111 @@ class PredInfo:
 
 
 @torch.no_grad()
+def compute_metrics1(hr_tensor: torch.tensor,
+                    entities_tensor: torch.tensor,
+                    target: List[int],
+                    examples: List[Example],
+                    model,
+                    k=3, batch_size=1024,
+                    total_head=None,
+                    total_rel=None,
+                    total_tail=None,
+                    topk=10) -> Tuple:
+    assert hr_tensor.size(1) == entities_tensor.size(1)
+    total = hr_tensor.size(0)
+    entity_cnt = len(entity_dict)
+    assert entity_cnt == entities_tensor.size(0)
+    target = torch.LongTensor(target).unsqueeze(-1).to(hr_tensor.device)
+    topk_scores, topk_indices = [], []
+    ranks = []
+
+    mean_rank, mrr, hit1, hit3, hit10 = 0, 0, 0, 0, 0
+
+    for start in tqdm.tqdm(range(0, total, batch_size)):
+        end = start + batch_size
+        # batch_size * entity_cnt
+        if args.use_cross_attention:
+            batch_score = model.compute_score(hr_tensor[start:end, :], entities_tensor)
+        else:
+            batch_score = torch.mm(hr_tensor[start:end, :], entities_tensor.t())
+        assert entity_cnt == batch_score.size(1)
+        batch_target = target[start:end]
+
+        # re-ranking based on topological structure
+        rerank_by_graph(batch_score, examples[start:end], entity_dict=entity_dict)
+        for idx in range(batch_score.size(0)):
+            mask_indices = []
+            cur_ex = examples[start + idx]
+            gold_neighbor_ids = all_triplet_dict.get_neighbors(cur_ex.head_id, cur_ex.relation)
+            if len(gold_neighbor_ids) > 10000:
+                logger.debug('{} - {} has {} neighbors'.format(cur_ex.head_id, cur_ex.relation, len(gold_neighbor_ids)))
+            for e_id in gold_neighbor_ids:
+                if e_id == cur_ex.tail_id:
+                    continue
+                mask_indices.append(entity_dict.entity_to_idx(e_id))
+            mask_indices = torch.LongTensor(mask_indices).to(batch_score.device)
+            batch_score[idx].index_fill_(0, mask_indices, -1)
+        top_scores, top_indices = torch.topk(batch_score, topk, dim=1)
+
+        # 定义自定义函数并应用到前50个分数
+        triples = []
+        for piece in range(len(top_indices)):
+            indices = torch.randperm(topk)[:topk]
+            index_array = top_indices[piece][indices]
+            for index in index_array:
+
+                triple = 'the head is ' + total_head[piece] + ', the relation is ' + total_rel[
+                    piece] + ', the predict tail is ' + total_tail[index]
+                triples.append(triple)
+        mini_batch = 400
+        updated_scores=[]
+        for index in range(0, len(triples), mini_batch):
+            if index + mini_batch > len(triples):
+                mini_batch = len(triples) - index
+            temp_triples = triples[index:index + mini_batch]
+            outputs = model.discriminate(temp_triples)
+            updated_scores.extend(outputs)
+        # 应用自定义函数并更新 batch_score
+        updated_scores=torch.tensor(updated_scores).view(len(top_indices),-1).to(top_indices.device)
+        # 创建一个零矩阵
+        rescore_batch = torch.full_like(batch_score, -1e4)
+        # 使用 advanced indexing 更新前50个位置
+        rescore_batch.scatter_(1, top_indices, updated_scores)
+        # 后续的排序和指标计算基于更新后的 rescore_batch
+        batch_sorted_score, batch_sorted_indices = torch.sort(rescore_batch, dim=-1, descending=True)
+        target_rank = torch.nonzero(batch_sorted_indices.eq(batch_target).long(), as_tuple=False)
+
+        assert target_rank.size(0) == batch_score.size(0)
+
+        for idx in range(batch_score.size(0)):
+            idx_rank = target_rank[idx].tolist()
+            assert idx_rank[0] == idx
+            cur_rank = idx_rank[1]
+            cur_rank += 1
+            mean_rank += cur_rank
+            mrr += 1.0 / cur_rank
+            hit1 += 1 if cur_rank <= 1 else 0
+            hit3 += 1 if cur_rank <= 3 else 0
+            hit10 += 1 if cur_rank <= 10 else 0
+            ranks.append(cur_rank)
+
+        topk_scores.extend(batch_sorted_score[:, :k].tolist())
+        topk_indices.extend(batch_sorted_indices[:, :k].tolist())
+
+    metrics = {'mean_rank': mean_rank, 'mrr': mrr, 'hit@1': hit1, 'hit@3': hit3, 'hit@10': hit10}
+    metrics = {k: round(v / total, 4) for k, v in metrics.items()}
+
+    assert len(topk_scores) == total
+    return topk_scores, topk_indices, metrics, ranks
+
+@torch.no_grad()
 def compute_metrics(hr_tensor: torch.tensor,
                     entities_tensor: torch.tensor,
                     target: List[int],
                     examples: List[Example],
                     model,
-                    k=3, batch_size=256) -> Tuple:
+                    k=3, batch_size=1024,
+                    ) -> Tuple:
     assert hr_tensor.size(1) == entities_tensor.size(1)
     total = hr_tensor.size(0)
     entity_cnt = len(entity_dict)
@@ -107,14 +205,13 @@ def compute_metrics(hr_tensor: torch.tensor,
     metrics = {k: round(v / total, 4) for k, v in metrics.items()}
     assert len(topk_scores) == total
     return topk_scores, topk_indices, metrics, ranks
-
-
 def predict_by_split():
     assert os.path.exists(args.valid_path)
     assert os.path.exists(args.train_path)
 
     predictor = BertPredictor()
     predictor.load(ckt_path=args.eval_model_path)
+
     entity_tensor = predictor.predict_by_entities(entity_dict.entity_exs)
 
     forward_metrics = eval_single_direction(predictor,
@@ -137,7 +234,7 @@ def predict_by_split():
 def eval_single_direction(predictor: BertPredictor,
                           entity_tensor: torch.tensor,
                           eval_forward=True,
-                          batch_size=256) -> dict:
+                          batch_size=1024) -> dict:
     start_time = time()
     examples = load_data(args.valid_path, add_forward_triplet=eval_forward, add_backward_triplet=not eval_forward)
     hr_tensor,model = predictor.predict_by_examples(examples,entity_tensor)
