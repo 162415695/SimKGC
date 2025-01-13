@@ -12,6 +12,8 @@ import torch.utils.data
 import predict
 import tqdm
 from time import time
+
+from hop_graph import graph_build
 from triplet_mask import construct_mask, construct_mask_extra_batch, construct_n_hop_mask
 from typing import Dict
 from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
@@ -137,7 +139,7 @@ class SparsemaxBCELoss(nn.Module):
 class Trainer:
 
     def __init__(self, args, ngpus_per_node):
-
+        graph_build()
         self.args = args
         self.ngpus_per_node = ngpus_per_node
         build_tokenizer(args)
@@ -189,6 +191,16 @@ class Trainer:
         train_dataset = Dataset(path=args.train_path, task=args.task)
         valid_dataset = Dataset(path=args.valid_path, task=args.task) if args.valid_path else None
         num_training_steps = args.epochs * len(train_dataset) // max(args.batch_size, 1)
+        examples=train_dataset.examples
+        self.train_keys=[]
+        self.train_examples={}
+        for i in examples:
+            key=i.head_id+i.relation
+            self.train_keys.append(key)
+            if key in self.train_examples:
+                self.train_examples[key].append(i)
+            else:
+                self.train_examples[key]=[i]
         self.train_steps = num_training_steps
         self.current_steps = 0
         args.warmup = min(args.warmup, num_training_steps // 10)
@@ -232,7 +244,15 @@ class Trainer:
                 epoch = 0  # 重置为0重新开始
             else:
                 epoch += 1  # 继续到下一个epoch
-                self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
+
+                if epoch<=40 and epoch%5==0:
+                    self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
+                elif epoch>=40 and epoch <=60 and epoch%4==0:
+                    self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
+                elif epoch>=60 and epoch <=80 and epoch%2==0:
+                    self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
+                elif epoch>=80:
+                    self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
 
     @torch.no_grad()
     def _run_eval(self, epoch, step=0, extra_batch_num=0):
@@ -296,7 +316,6 @@ class Trainer:
             )
 
     def train_epoch(self, epoch):
-
 
         if self.extra_flag:
             prefix = "Epoch: [{}],extra_batch:[{}]".format(epoch, self.extra_batch_size)
@@ -459,8 +478,7 @@ class Trainer:
                         loss.backward()
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
                         self.optimizer.step()
-                self.scheduler.step()
-                # compute gradient and do SGD step
+            self.scheduler.step()
             if i % self.args.print_freq == 0:
                 if self.args.add_discriminator:
                     progress_dis.display(i)
@@ -486,6 +504,11 @@ class Trainer:
                             else:
                                 logger.info("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
                                 self.extra_flag = False
+        if self.args.use_dino:
+            for student_param, teacher_param in zip(self.model.module.hr_bert.parameters(),
+                                                    self.model.module.tail_bert.parameters()):
+                teacher_param.data = self.args.ema_decay * teacher_param.data + (
+                            1 - self.args.ema_decay) * student_param.data
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
         return False
 

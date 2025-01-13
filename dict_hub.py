@@ -12,12 +12,22 @@ all_triplet_dict: TripletDict = None
 link_graph: LinkGraph = None
 entity_dict: EntityDict = None
 tokenizer: AutoTokenizer = None
+train_valid_triplet_dict: TripletDict = None
 
 
 def _init_entity_dict():
     global entity_dict
     if not entity_dict:
         entity_dict = EntityDict(entity_dict_dir=os.path.dirname(args.valid_path))
+
+
+def _init_train_valid_triplet_dict():
+    global train_valid_triplet_dict
+    if not train_valid_triplet_dict:
+        path_pattern = '{}/*.txt.json'.format(os.path.dirname(args.train_path))
+        path_list = glob.glob(path_pattern)
+        path_list.remove('{}/test.txt.json'.format(os.path.dirname(args.train_path)))
+        train_valid_triplet_dict = TripletDict(path_list=path_list)
 
 
 def _init_train_triplet_dict():
@@ -42,6 +52,11 @@ def _init_link_graph():
 def get_entity_dict():
     _init_entity_dict()
     return entity_dict
+
+
+def get_train_valid_triplet_dict():
+    _init_train_valid_triplet_dict()
+    return train_valid_triplet_dict
 
 
 def get_train_triplet_dict():

@@ -2,12 +2,13 @@ import torch
 
 from typing import List
 from config import args
-from dict_hub import get_train_triplet_dict, get_entity_dict, EntityDict, TripletDict
+from dict_hub import get_train_triplet_dict, get_entity_dict, EntityDict, TripletDict, get_all_triplet_dict,get_train_valid_triplet_dict
 from hop_graph import get_n_hop_node
 from logger_config import logger
 entity_dict: EntityDict = get_entity_dict()
 train_triplet_dict: TripletDict = get_train_triplet_dict() if not args.is_test else None
-
+all_triple_dict: TripletDict = get_all_triplet_dict()
+train_valid_triplet_dict: TripletDict = get_train_valid_triplet_dict()
 def construct_mask(row_exs: List, col_exs: List = None) -> torch.tensor:
     positive_on_diagonal = col_exs is None
     num_row = len(row_exs)
@@ -26,7 +27,10 @@ def construct_mask(row_exs: List, col_exs: List = None) -> torch.tensor:
     # mask out other possible neighbors
     for i in range(num_row):
         head_id, relation = row_exs[i].head_id, row_exs[i].relation
-        neighbor_ids = train_triplet_dict.get_neighbors(head_id, relation)
+        if args.remove_valid:
+            neighbor_ids = all_triple_dict.get_neighbors(head_id,relation)
+        else:
+            neighbor_ids = train_triplet_dict.get_neighbors(head_id, relation)
         # exact match is enough, no further check needed
         if len(neighbor_ids) <= 1:
             continue

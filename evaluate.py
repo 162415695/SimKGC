@@ -5,6 +5,8 @@ import torch
 from time import time
 from typing import List, Tuple
 from dataclasses import dataclass, asdict
+
+from hop_graph import get_n_hop_node,get_hop_graph
 from config import args
 from doc import load_data, Example
 from predict import BertPredictor
@@ -270,7 +272,66 @@ def eval_single_direction(predictor: BertPredictor,
 
     logger.info('Evaluation takes {} seconds'.format(round(time() - start_time, 3)))
     return metrics
+'''
 
+def eval_single_direction(predictor: BertPredictor,
+                          entity_tensor: torch.tensor,
+                          eval_forward=True,
+                          batch_size=1024) -> dict:
+    start_time = time()
+    examples = load_data(args.valid_path, add_forward_triplet=eval_forward, add_backward_triplet=not eval_forward)
+    hr_tensor, model = predictor.predict_by_examples(examples, entity_tensor)
+    hr_tensor = hr_tensor.to(entity_tensor.device)
+    temp_examples = list(examples.copy())
+    hop_exs=[[]for i in range(12)]
+    for n_hop in range(10):
+        logger.info(n_hop)
+        for ex in temp_examples:
+            id_li=get_n_hop_node(ex.head_id, n_hop+1)
+            if ex.tail_id not in id_li:
+                hop_exs[n_hop].append(ex)
+                temp_examples.remove(ex)
+            else:
+                continue
+    for ex in temp_examples:
+        if get_hop_graph().are_connected(ex.head_id,ex.tail_id):
+            hop_exs[10].append(ex)
+        else:
+            hop_exs[11].append(ex)
+    for i,example in enumerate(hop_exs):
+        logger.info(str(i+1)+'跳')
+        logger.info(len(example))
+        target = [entity_dict.entity_to_idx(ex.tail_id) for ex in example]
+        #logger.info('predict tensor done, compute metrics...')
+        topk_scores, topk_indices, metrics, ranks = compute_metrics(hr_tensor=hr_tensor, entities_tensor=entity_tensor,
+                                                                    target=target, examples=examples,
+                                                                    batch_size=len(target), model=model)
+        eval_dir = 'forward' if eval_forward else 'backward'
+        logger.info('{} metrics: {}'.format(eval_dir, json.dumps(metrics)))
 
+        pred_infos = []
+        for idx, ex in enumerate(examples):
+            cur_topk_scores = topk_scores[idx]
+            cur_topk_indices = topk_indices[idx]
+            pred_idx = cur_topk_indices[0]
+            cur_score_info = {entity_dict.get_entity_by_idx(topk_idx).entity: round(topk_score, 3)
+                              for topk_score, topk_idx in zip(cur_topk_scores, cur_topk_indices)}
+
+            pred_info = PredInfo(head=ex.head, relation=ex.relation,
+                                 tail=ex.tail, pred_tail=entity_dict.get_entity_by_idx(pred_idx).entity,
+                                 pred_score=round(cur_topk_scores[0], 4),
+                                 topk_score_info=json.dumps(cur_score_info),
+                                 rank=ranks[idx],
+                                 correct=pred_idx == target[idx])
+            pred_infos.append(pred_info)
+
+        prefix, basename = os.path.dirname(args.eval_model_path), os.path.basename(args.eval_model_path)
+        split = os.path.basename(args.valid_path)
+        with open('{}/eval_{}_{}_{}.json'.format(prefix, split, eval_dir, basename), 'w', encoding='utf-8') as writer:
+            writer.write(json.dumps([asdict(info) for info in pred_infos], ensure_ascii=False, indent=4))
+
+        #logger.info('Evaluation takes {} seconds'.format(round(time() - start_time, 3)))
+    return metrics
+    '''
 if __name__ == '__main__':
     predict_by_split()

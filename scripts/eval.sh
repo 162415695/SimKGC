@@ -26,7 +26,7 @@ if [[ $# -ge 1 && ! "$1" == "--"* ]]; then
     shift
 fi
 
-neighbor_weight=0.05
+neighbor_weight=0
 rerank_n_hop=2
 if [ "${task}" = "WN18RR" ]; then
 # WordNet is a sparse graph, use more neighbors for re-rank

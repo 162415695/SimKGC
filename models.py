@@ -1,5 +1,8 @@
 from abc import ABC
 from copy import deepcopy
+
+from torch._subclasses import FakeTensor, FakeTensorMode
+
 from config import args
 import torch
 import torch.nn as nn
@@ -14,6 +17,11 @@ from triplet_mask import construct_mask
 from utils import move_to_cuda
 from peft import LoraConfig, TaskType, get_peft_model
 import numpy as np
+import torch._dynamo
+
+# 禁用 TorchDynamo
+torch._dynamo.config.suppress_errors = True  # 捕获错误并回退到 Eager 模式
+torch._dynamo.disable()  # 完全禁用 TorchDynamo
 
 
 def build_model(args) -> nn.Module:
@@ -215,10 +223,16 @@ class CustomBertModel(nn.Module, ABC):
         return self.discriminator(**encoding)
 
     def _encode(self, encoder, token_ids, mask, token_type_ids):
-        outputs = encoder(input_ids=token_ids,
+        try:
+            outputs = encoder(input_ids=token_ids,
                           attention_mask=mask,
                           token_type_ids=token_type_ids,
                           return_dict=True)
+        except:
+
+            outputs = encoder(input_ids=token_ids,
+                              attention_mask=mask,
+                              return_dict=True)
 
         last_hidden_state = outputs.last_hidden_state
         cls_output = last_hidden_state[:, 0, :]
@@ -233,19 +247,31 @@ class CustomBertModel(nn.Module, ABC):
             return self.predict_ent_embedding(tail_token_ids=tail_token_ids,
                                               tail_mask=tail_mask,
                                               tail_token_type_ids=tail_token_type_ids)
-
-        tail_vector = self._encode(self.tail_bert,
+        if self.args.use_dino:
+            with torch.no_grad():
+                tail_vector = self._encode(self.tail_bert,
+                                           token_ids=tail_token_ids,
+                                           mask=tail_mask,
+                                           token_type_ids=tail_token_type_ids)
+                head_vector = self._encode(self.tail_bert,
+                                           token_ids=head_token_ids,
+                                           mask=head_mask,
+                                           token_type_ids=head_token_type_ids)
+        else:
+            tail_vector = self._encode(self.tail_bert,
                                    token_ids=tail_token_ids,
                                    mask=tail_mask,
                                    token_type_ids=tail_token_type_ids)
-        head_vector = self._encode(self.tail_bert,
-                                   token_ids=head_token_ids,
-                                   mask=head_mask,
-                                   token_type_ids=head_token_type_ids)
+            head_vector = self._encode(self.tail_bert,
+                                       token_ids=head_token_ids,
+                                       mask=head_mask,
+                                       token_type_ids=head_token_type_ids)
+
         hr_vector = self._encode(self.hr_bert,
                                  token_ids=hr_token_ids,
                                  mask=hr_mask,
                                  token_type_ids=hr_token_type_ids)
+
         # if not self.args.use_cross_attention:
         #     hr_vector = self._encode(self.hr_bert,
         #                              token_ids=hr_token_ids,

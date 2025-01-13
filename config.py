@@ -100,7 +100,18 @@ parser.add_argument('--use-moe',default=False, action='store_true',
                     help='use moe for hr_bert and tail_bert')
 parser.add_argument('--add-discriminator',default=False, action='store_true',
                     help='add extra tail discriminator')
+parser.add_argument('--remove-valid',default=False, action='store_true',
+                    help='remove valid and test triples whe generate false sample')
+parser.add_argument('--use-dino',default=False, action='store_true',
+                    help='use dino mode to train model')
+parser.add_argument('--ema-decay', default=0.996, type=float,
+                    help='influence teacher update rate')
 args = parser.parse_args()
+'''
+args.valid_path='data/WN18RR/'
+args.train_path='data/WN18RR/train.txt.json'
+args.skip=True
+'''
 if not args.skip:
     assert not args.train_path or os.path.exists(args.train_path)
     assert args.pooling in ['cls', 'mean', 'max']

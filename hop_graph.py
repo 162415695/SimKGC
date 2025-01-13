@@ -11,6 +11,11 @@ name_to_index=None
 index_to_name=None
 
 # 使用 Python 的 pickle 模块
+def get_hop_graph():
+    global hop_graph
+    if hop_graph is None:
+        graph_build()
+    return hop_graph
 def graph_build():
     file_name = '{}/igraph.pkl'.format(os.path.dirname(args.train_path))
     global hop_graph
@@ -27,13 +32,14 @@ def graph_build():
     else:
         logger.info("构建多跳子图")
         hop_graph = Graph(directed=False)
-        nodes = set()
+        nodes = []
         # 定义三元组列表 (source, target, weight)，节点为字符串
+        entities = get_entity_dict().entity_exs
         examples = json.load(open(args.train_path, 'r', encoding='utf-8'))
-        for ex in examples:
-            head_id, tail_id = ex['head_id'], ex['tail_id']
-            nodes.update([head_id, tail_id])
-        hop_graph.add_vertices(list(nodes))
+        for ex in entities:
+            node_id=ex.entity_id
+            nodes.append(node_id)
+        hop_graph.add_vertices(nodes)
         logger.info("节点添加完成")
         # 添加边和权重
         for ex in examples:
@@ -48,13 +54,27 @@ def graph_build():
 
 def get_n_hop_node(node_id, n_hop=0):
     global hop_graph
+    if hop_graph==None:
+        graph_build()
     if n_hop == 0:
         return []
     node_index = name_to_index.get(node_id)
     hops = n_hop  # 跳数
-    try:
-        neighborhood = hop_graph.neighborhood(vertices=node_index, order=hops)
-        neighborhood_names = [index_to_name[index] for index in neighborhood]
-    except:
-        neighborhood_names = []
+    neighborhood = hop_graph.neighborhood(vertices=node_index, order=hops)
+    neighborhood_names = [index_to_name[index] for index in neighborhood]
+
     return neighborhood_names
+
+def get_dis(node_id1,node_id2):
+    global hop_graph
+    node_index = name_to_index.get(node_id1)
+    node_index2 = name_to_index.get(node_id2)
+
+    if hop_graph==None:
+        graph_build()
+
+    distance = hop_graph.distances(node_index,node_index2)[0][0]
+    if distance == float('inf'):
+        return -1
+    else:
+        return int(distance)
