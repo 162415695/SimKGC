@@ -15,37 +15,26 @@ if [ -z "$DATA_DIR" ]; then
   DATA_DIR="${DIR}/data/${TASK}"
 fi
 
-
-neighbor_weight=0.05
-rerank_n_hop=4
-if [ "${TASK}" = "WN18RR" ]; then
-# WordNet is a sparse graph, use more neighbors for re-rank
-  rerank_n_hop=5
-fi
-if [ "${TASK}" = "wiki5m_ind" ]; then
-# for inductive setting of wiki5m, test nodes never appear in the training set
-  neighbor_weight=0.0
-fi
 python3 -u main.py \
 --model-dir "${OUTPUT_DIR}" \
---pretrained-model /mnt/data/yhy/model/bert-large-uncased \
+--pretrained-model /mnt/data/yhy/model/bert-base-uncased \
 --pooling mean \
 --lr 5e-4 \
 --use-link-graph \
 --train-path "${DATA_DIR}/train.txt.json" \
 --valid-path "${DATA_DIR}/valid.txt.json" \
 --task ${TASK} \
---neighbor-weight "${neighbor_weight}" \
---rerank-n-hop "${rerank_n_hop}" \
---batch-size 768 \
---print-freq 20 \
+--neighbor-weight 0 \
+--rerank-n-hop 0 \
+--batch-size 2048 \
+--print-freq 10 \
 --additive-margin 0.02 \
 --use-amp \
 --pre-batch 0 \
 --finetune-t \
---epochs 100 \
+--epochs 500 \
 --use-self-negative \
 --workers 4 \
 --max-to-keep 5 \
 --use-dino \
---ema-decay 0.996 "$@"
+--ema-decay 0.98 "$@"

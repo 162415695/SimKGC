@@ -14,7 +14,7 @@ from dict_hub import get_tokenizer
 from logger_config import logger
 from modeling_moebert import MoEBertModel
 from triplet_mask import construct_mask
-from utils import move_to_cuda
+from utils import move_to_cuda, trunc_normal_
 from peft import LoraConfig, TaskType, get_peft_model
 import numpy as np
 import torch._dynamo
@@ -96,7 +96,6 @@ class CrossAttention(nn.Module):
         nn.init.kaiming_uniform_(self.proj_k2.weight, nonlinearity='relu')
         nn.init.kaiming_uniform_(self.proj_v2.weight, nonlinearity='relu')
 
-
     def forward(self, x1, x2):
         batch_size, in_dim1 = x1.size()
         # 计算 q1
@@ -122,6 +121,104 @@ class CrossAttention(nn.Module):
         output = nn.functional.normalize(output_temp, dim=1)
         return output
 
+
+class DINOHead(nn.Module):
+    def __init__(self, in_dim, out_dim, use_bn=False, norm_last_layer=True, nlayers=3, hidden_dim=2048,
+                 bottleneck_dim=256):
+        super().__init__()
+        nlayers = max(nlayers, 1)
+        if nlayers == 1:
+            self.mlp = nn.Linear(in_dim, bottleneck_dim)
+        else:
+            layers = [nn.Linear(in_dim, hidden_dim)]
+            if use_bn:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.GELU())
+            for _ in range(nlayers - 2):
+                layers.append(nn.Linear(hidden_dim, hidden_dim))
+                if use_bn:
+                    layers.append(nn.BatchNorm1d(hidden_dim))
+                layers.append(nn.GELU())
+            layers.append(nn.Linear(hidden_dim, bottleneck_dim))
+            self.mlp = nn.Sequential(*layers)
+        self.apply(self._init_weights)
+        self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
+        self.last_layer.weight_g.data.fill_(1)
+        if norm_last_layer:
+            self.last_layer.weight_g.requires_grad = False
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+
+    def forward(self, x):
+        x = self.mlp(x)
+        x = nn.functional.normalize(x, dim=-1, p=2)
+        x = self.last_layer(x)
+        return x
+
+
+class BertWithDINOHead(nn.Module):
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+    def __init__(self, bert_model_name, dino_head_params,init=False):
+        """
+        初始化一个包含 BERT 和 DINOHead 的模型。
+        :param bert_model_name: BERT 的预训练模型名称（如 'bert-base-uncased'）。
+        :param dino_head_params: 一个字典，包含 DINOHead 的参数，如 in_dim, out_dim, hidden_dim 等。
+        """
+        super(BertWithDINOHead, self).__init__()
+
+        # 加载预训练的 BERT 模型
+        self.bert = BertModel.from_pretrained(bert_model_name)
+        if init:
+            self.bert.init_weights()
+        # 禁用 BERT 的分类头
+        self.bert.pooler = None  # 去掉 BERT 的池化层
+        self.bert.classifier = nn.Identity()  # 避免分类头的干扰
+
+        # 获取 DINOHead 的输入维度
+        bert_output_dim = self.bert.config.hidden_size  # 通常为 768 或 1024
+
+        # 创建 DINOHead
+        self.dino_head = DINOHead(
+            in_dim=bert_output_dim,
+            out_dim=dino_head_params['out_dim'],
+            hidden_dim=dino_head_params.get('hidden_dim', 2048),
+            bottleneck_dim=dino_head_params.get('bottleneck_dim', 256),
+            nlayers=dino_head_params.get('nlayers', 3),
+            use_bn=dino_head_params.get('use_bn', False),
+            norm_last_layer=dino_head_params.get('norm_last_layer', True)
+        )
+        self.apply(self._init_weights)
+
+
+    def forward(self, input_ids, attention_mask=None, token_type_ids=None,return_dict=False):
+        """
+        前向传播：
+        1. 使用 BERT 提取特征；
+        2. 将 BERT 的输出特征传递到 DINOHead。
+        """
+        # 获取 BERT 的输出
+        bert_outputs = self.bert(input_ids=input_ids,
+                                 attention_mask=attention_mask,
+                                 token_type_ids=token_type_ids)
+        # 通常我们只使用 [CLS] token 的输出，即序列中第一个 token 的特征
+        last_hidden_state = bert_outputs.last_hidden_state
+        cls_output = last_hidden_state[:, 0, :]
+        cls_output = _pool_output("mean", cls_output, attention_mask, last_hidden_state)
+        # 将所有 token 的特征传递给 DINOHead
+        # DINOHead 需要支持 [batch_size, seq_len, hidden_size] 的输入
+        dino_output = self.dino_head(cls_output)
+        return dino_output
+
+
 class BertForTextClassification(nn.Module):
     def __init__(self, bert_model_name, freeze_bert_layers=True):
         super(BertForTextClassification, self).__init__()
@@ -135,12 +232,15 @@ class BertForTextClassification(nn.Module):
             # 解冻最后一层（可以根据需要调整解冻的层数）
             for param in self.bert.encoder.layer[-6:].parameters():
                 param.requires_grad = True
-    def forward(self, input_ids, attention_mask,token_type_ids):
-        outputs = self.bert(input_ids, attention_mask=attention_mask,token_type_ids=token_type_ids)
+
+    def forward(self, input_ids, attention_mask, token_type_ids):
+        outputs = self.bert(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
         pooled_output = outputs[1]  # [CLS] token's representation
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
         return logits.squeeze(-1)
+
+
 class CustomBertModel(nn.Module, ABC):
     def __init__(self, args):
         super().__init__()
@@ -169,12 +269,13 @@ class CustomBertModel(nn.Module, ABC):
                 "topk": 2,
                 "hidden_dropout_prob": 0.05,
                 "attention_probs_dropout_prob": 0.0,
-                "output_hidden_states":True
+                "output_hidden_states": True
             }
             for key, value in moe_dict.items():
                 if not hasattr(self.config, key):
                     setattr(self.config, key, value)
-            self.hr_bert = MoEBertModel.from_pretrained(self.args.pretrained_model,config=self.config)
+            self.hr_bert = MoEBertModel.from_pretrained(self.args.pretrained_model, config=self.config)
+            self.tail_bert = AutoModel.from_pretrained(self.args.pretrained_model)
         elif args.use_lora:
             config = LoraConfig(
                 task_type=TaskType.FEATURE_EXTRACTION,
@@ -186,9 +287,23 @@ class CustomBertModel(nn.Module, ABC):
             )
 
             self.hr_bert = get_peft_model(AutoModel.from_pretrained(self.args.pretrained_model), config)
+            self.tail_bert = AutoModel.from_pretrained(self.args.pretrained_model)
+        elif self.args.use_dino:
+
+            dino_head_params = {
+                "out_dim": 65536,  # 输出维度（通常为对比学习任务中的高维特征）
+                "hidden_dim": 2048,
+                "bottleneck_dim": 256,
+                "nlayers": 3,
+                "use_bn": False,
+                "norm_last_layer": True
+            }
+            self.dino_config = dino_head_params
+            self.hr_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params,init=self.args.init_all)
+            self.tail_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params,init=self.args.init_all)
         else:
             self.hr_bert = AutoModel.from_pretrained(self.args.pretrained_model)
-        self.tail_bert = AutoModel.from_pretrained(self.args.pretrained_model)
+            self.tail_bert = AutoModel.from_pretrained(self.args.pretrained_model)
 
         if args.use_cross_attention:
             self.cross_attention = CrossAttention(768, 768, 192, 192, 4)
@@ -201,15 +316,16 @@ class CustomBertModel(nn.Module, ABC):
                 param.requires_grad = False
             for param in self.hr_bert.parameters():
                 param.requires_grad = False
-        self.tokenizer=get_tokenizer()
-    def discriminate(self,sentence):
-        questions=[]
-        answers=[]
+        self.tokenizer = get_tokenizer()
+
+    def discriminate(self, sentence):
+        questions = []
+        answers = []
         for i in sentence:
             questions.append(i[0])
             answers.append(i[1])
 
-        encoding =self.tokenizer(
+        encoding = self.tokenizer(
             questions,
             answers,
             add_special_tokens=True,
@@ -218,26 +334,29 @@ class CustomBertModel(nn.Module, ABC):
             return_attention_mask=True,
             return_tensors='pt',
         )
-        for key,value in encoding.items():
+        for key, value in encoding.items():
             encoding[key] = move_to_cuda(value)
         return self.discriminator(**encoding)
 
     def _encode(self, encoder, token_ids, mask, token_type_ids):
         try:
             outputs = encoder(input_ids=token_ids,
-                          attention_mask=mask,
-                          token_type_ids=token_type_ids,
-                          return_dict=True)
+                              attention_mask=mask,
+                              token_type_ids=token_type_ids,
+                              return_dict=True)
         except:
 
             outputs = encoder(input_ids=token_ids,
                               attention_mask=mask,
                               return_dict=True)
+        if self.args.use_dino:
+            return outputs
+        else:
+            last_hidden_state = outputs.last_hidden_state
+            cls_output = last_hidden_state[:, 0, :]
+            cls_output = _pool_output(self.args.pooling, cls_output, mask, last_hidden_state)
+            return cls_output
 
-        last_hidden_state = outputs.last_hidden_state
-        cls_output = last_hidden_state[:, 0, :]
-        cls_output = _pool_output(self.args.pooling, cls_output, mask, last_hidden_state)
-        return cls_output
     def forward(self, hr_token_ids, hr_mask, hr_token_type_ids,
                 tail_token_ids, tail_mask, tail_token_type_ids,
                 head_token_ids, head_mask, head_token_type_ids,
@@ -259,9 +378,9 @@ class CustomBertModel(nn.Module, ABC):
                                            token_type_ids=head_token_type_ids)
         else:
             tail_vector = self._encode(self.tail_bert,
-                                   token_ids=tail_token_ids,
-                                   mask=tail_mask,
-                                   token_type_ids=tail_token_type_ids)
+                                       token_ids=tail_token_ids,
+                                       mask=tail_mask,
+                                       token_type_ids=tail_token_type_ids)
             head_vector = self._encode(self.tail_bert,
                                        token_ids=head_token_ids,
                                        mask=head_mask,
