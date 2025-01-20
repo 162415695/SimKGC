@@ -106,8 +106,8 @@ parser.add_argument('--use-dino',default=False, action='store_true',
                     help='use dino mode to train model')
 parser.add_argument('--ema-decay', default=0.996, type=float,
                     help='influence teacher update rate')
-parser.add_argument('--init-all',default=False, action='store_true',
-                    help='init all')
+parser.add_argument('--dino-loss',default=False, action='store_true',
+                    help='dino loss')
 args = parser.parse_args()
 '''
 args.valid_path='data/WN18RR/'

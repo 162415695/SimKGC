@@ -137,6 +137,14 @@ class SparsemaxBCELoss(nn.Module):
         return loss
 
 
+def cosine_similarity_loss(u, v):
+    # 计算余弦相似度
+    cosine_sim = F.cosine_similarity(u, v, dim=-1)
+    # 损失值：1 - 相似度
+    loss = 1 - cosine_sim.mean()
+    return loss
+
+
 class DINOLoss(nn.Module):
     def __init__(self, out_dim, warmup_teacher_temp, teacher_temp,
                  warmup_teacher_temp_epochs, nepochs, student_temp=0.1,
@@ -160,6 +168,7 @@ class DINOLoss(nn.Module):
         teacher_output: batch × num_tokens × dim
         """
         self.center = self.center.to(teacher_output.device)
+
         # 1. 学生模型输出的温度缩放
         student_out = student_output / self.student_temp  # 温度缩放
         # 对最后一个维度（特征维度 dim）进行 log_softmax
@@ -177,7 +186,6 @@ class DINOLoss(nn.Module):
 
         # 4. 更新教师模型的中心向量
         self.update_center(teacher_output)
-
         return loss
 
     @torch.no_grad()
@@ -191,9 +199,12 @@ class DINOLoss(nn.Module):
         # 动态更新中心向量（使用动量平滑）
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
+
 def random_sample_with_replacement(tensor, num_samples):
-        indices = torch.randint(0, tensor.size(0), (num_samples,), device=tensor.device)
-        return tensor[indices]
+    indices = torch.randint(0, tensor.size(0), (num_samples,), device=tensor.device)
+    return tensor[indices]
+
+
 class Trainer:
 
     def __init__(self, args, ngpus_per_node):
@@ -204,7 +215,6 @@ class Trainer:
         # create model
         logger.info("=> creating model")
         self.model = build_model(self.args)
-        self.dino_loss = DINOLoss(65536, 0.04, 0.04, 0, self.args.epochs)
 
         if args.pretrained_ckpt is not None:
             logger.info("读取已有模型权重")
@@ -292,24 +302,24 @@ class Trainer:
             logger.info("额外batch上限因为数据量调整为" + str(self.extra_batch_limit))
         self.momentum_schedule = utils.cosine_scheduler(self.args.ema_decay, 1, args.epochs, len(self.train_loader))
 
-
     def train_loop(self):
         if self.args.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
         epoch = 0
 
-        self._run_eval(epoch=0, extra_batch_num=0)
+       # self._run_eval(epoch=0, extra_batch_num=0)
 
         while epoch < self.args.epochs:
             # train for one epoch
-            extra_flag = self.train_epoch(epoch)
+            extra_flag,loss = self.train_epoch(epoch)
             if extra_flag:
                 logger.info('已扩大batch,重新进行训练')
                 epoch = 0  # 重置为0重新开始
             else:
                 epoch += 1  # 继续到下一个epoch
-                self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
-
+                if loss<1:
+                    logger.info('loss小于1,开始验证存储检查点')
+                    self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
 
     @torch.no_grad()
     def _run_eval(self, epoch, step=0, extra_batch_num=0):
@@ -326,64 +336,23 @@ class Trainer:
         }, filename=filename)
         delete_old_ckt(path_pattern='{}/checkpoint_*.mdl'.format(self.args.model_dir),
                        keep=self.args.max_to_keep)
-        '''
-        if self.args.use_dino:
-            metric_dict = self.eval_epoch(epoch)
-            logger.info('current loss is '+str(metric_dict['loss']))
-            logger.info('current negative loss is '+str(metric_dict['nega_loss']))
-            is_best = self.best_metric is None or (metric_dict['loss'] < self.best_metric['loss'] and metric_dict['nega_loss']>1)
-            if is_best:
-                self.best_metric = metric_dict
-            logger.info('best loss is '+str(self.best_metric['loss']))
-            logger.info('best negative is ' + str(self.best_metric['nega_loss']))
 
-            copy_checkpoint(filename, is_best)
-        
-        else:
-        '''
+
         metric_dict = self.eval_entity(epoch)
         is_best = self.best_metric is None or (metric_dict['hit@1'] > self.best_metric['hit@1'])
         if is_best:
             self.best_metric = metric_dict
         copy_checkpoint(filename, is_best)
 
-    @torch.no_grad()
-    def eval_epoch(self, epoch) -> Dict:
-        total_valid_batch = {i: k for i, k in enumerate(self.valid_loader)}
-        losses = AverageMeter('Loss', ':.8')
-        nega_losses= AverageMeter('Loss', ':.8')
-        for i, batch_dict in total_valid_batch.items():
-
-            self.model.eval()
-            batch_size = len(batch_dict['batch_data'])
-            # compute output
-            if self.args.use_amp:
-                with torch.cuda.amp.autocast():
-                    outputs = self.model(**batch_dict)
-            else:
-                outputs = self.model(**batch_dict)
 
 
-            sample1 = random_sample_with_replacement(outputs['hr_vector'], len(outputs['hr_vector']))
-            sample2 = random_sample_with_replacement(outputs['tail_vector'], len(outputs['tail_vector']))
-            with torch.no_grad():
-                nega_loss=self.dino_loss(sample1, sample2)
-            loss = self.dino_loss(outputs['hr_vector'], outputs['tail_vector'])
-            if isinstance(loss, torch.Tensor) and loss.dim() > 0:
-                loss = loss.mean()
-                nega_loss =nega_loss.mean()
-            losses.update(loss.item(), batch_size)
-            nega_losses.update(nega_loss.item(), batch_size)
-        metrics={'loss':float(losses.avg),
-                 'nega_loss':float(nega_losses.avg)}
-        return metrics
     @torch.no_grad()
     def eval_entity(self, epoch) -> Dict:
         self.model.eval()
         _convert_is_test_2_true()
         #entity_tensor = self.predict_by_entities(entity_dict.entity_exs)
-        forward_metrics = self.eval_single_direction( eval_forward=True)
-        backward_metrics = self.eval_single_direction( eval_forward=False)
+        forward_metrics = self.eval_single_direction(eval_forward=True)
+        backward_metrics = self.eval_single_direction(eval_forward=False)
         metrics = {k: round((forward_metrics[k] + backward_metrics[k]) / 2, 4) for k in forward_metrics}
         logger.info('Averaged metrics: {}'.format(metrics))
         _convert_is_test_2_false()
@@ -417,12 +386,12 @@ class Trainer:
             )
 
     def train_epoch(self, epoch):
-
+        self.model.train()
         if self.extra_flag:
             prefix = "Epoch: [{}],extra_batch:[{}]".format(epoch, self.extra_batch_size)
         else:
             prefix = "Epoch: [{}]".format(epoch)
-        losses = AverageMeter('Loss', ':.4')
+        losses = AverageMeter('Loss', ':.6')
         top1 = AverageMeter('Acc@1', ':6.2f')
         top3 = AverageMeter('Acc@3', ':6.2f')
         inv_t = AverageMeter('InvT', ':6.2f')
@@ -430,7 +399,8 @@ class Trainer:
             len(self.train_loader),
             [losses, inv_t, top1, top3],
             prefix=prefix)
-        if self.args.use_dino:
+
+        if self.args.dino_loss:
             progress = ProgressMeter(
                 len(self.train_loader),
                 [losses],
@@ -449,7 +419,7 @@ class Trainer:
             self.current_steps += 1
             model = get_model_obj(self.model)
             candidate_index = generate_random_numbers(self.extra_batch_size, i, len(total_train_batch))
-            self.model.eval()
+
             total_head_id = [d.head_id for d in batch_dict['batch_data']]
             total_tail_id = [d.tail_id for d in batch_dict['batch_data']]
             tail_vector = []
@@ -491,10 +461,12 @@ class Trainer:
             if torch.cuda.is_available():
                 tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
+            '''
             if self.args.pretrained_ckpt:
                 self.model.eval()
             else:
                 self.model.train()
+                '''
             batch_size = len(batch_dict['batch_data'])
             # compute output
 
@@ -504,14 +476,16 @@ class Trainer:
             else:
                 outputs = self.model(**batch_dict)
 
-            if not self.args.use_dino:
-                outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
+            if not self.args.dino_loss:
+                with torch.cuda.amp.autocast():
+                    outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
                                                extra_tail=tail_vector)
                 outputs = ModelOutput(**outputs)
                 logits, labels = outputs.logits, outputs.labels
                 assert logits.size(0) == batch_size
                 # head + relation -> tail
                 # loss = self.criterion(logits, labels)
+
                 loss1 = self.criterion(logits, labels)
                 loss3 = self.criterion(logits[:, :batch_size].t(), labels)
                 loss = loss1 + loss3
@@ -521,6 +495,12 @@ class Trainer:
                 inv_t.update(outputs.inv_t, 1)
                 losses.update(loss.item(), batch_size)
             else:
+
+                loss = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
+                                               extra_tail=tail_vector)
+
+                losses.update(loss.item(), batch_size)
+                '''
                 sample1 = outputs['hr_vector'].clone()
                 sample2 = outputs['tail_vector'].clone()
                 sample1= random_sample_with_replacement(sample1,len(sample1))
@@ -530,22 +510,23 @@ class Trainer:
 
                 if isinstance(loss, torch.Tensor) and loss.dim() > 0:
                     loss = loss.mean()
-                    nega_loss=nega_loss.mean()
+                    nega_loss = nega_loss.mean()
 
-                loss+=1/nega_loss
+                loss += (1 - nega_loss)
                 losses.update(loss.item(), batch_size)
+                '''
             self.optimizer.zero_grad()
-            if not self.args.pretrained_ckpt:
-                if self.args.use_amp:
-                    self.scaler.scale(loss).backward()
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                    self.optimizer.step()
+            #if not self.args.pretrained_ckpt:
+            if self.args.use_amp:
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                self.optimizer.step()
 
             if self.args.add_discriminator:
                 total_head = batch_dict['head_text']
@@ -629,18 +610,17 @@ class Trainer:
         if self.args.use_dino:
             with torch.no_grad():
                 m = self.momentum_schedule[self.current_steps]  # 当前动量值
-                for param_q, param_k in zip(self.model.module.hr_bert.parameters(), self.model.module.tail_bert.parameters()):
+                for param_q, param_k in zip(self.model.module.hr_bert.parameters(),
+                                            self.model.module.tail_bert.parameters()):
                     param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
-        return False
+        return False,loss.detach()
 
     def _setup_training(self):
         if torch.cuda.device_count() > 1:
             self.model = torch.nn.DataParallel(self.model).cuda()
-            self.dino_loss=torch.nn.DataParallel(self.dino_loss).cuda()
         elif torch.cuda.is_available():
             self.model.cuda()
-            self.dino_loss.cuda()
         else:
             logger.info('No gpu will be used')
 
@@ -698,7 +678,7 @@ class Trainer:
 
     @torch.no_grad()
     def eval_single_direction(self,
-                              entity_tensor: torch.tensor=None,
+                              entity_tensor: torch.tensor = None,
                               eval_forward=True,
                               batch_size=4096) -> dict:
         start_time = time()
@@ -711,11 +691,11 @@ class Trainer:
         #     hr_tensor = self.predict_by_examples_new(all_entity_exs = entity_dict.entity_exs, valid_examples = examples)
         target = [entity_dict.entity_to_idx(ex.tail_id) for ex in examples]
         logger.info('predict tensor done, compute metrics...')
-        k=3
+        k = 3
         temp_examples = []
         for entity_ex in entity_dict.entity_exs:
             temp_examples.append(Example(head_id='', relation='',
-                                    tail_id=entity_ex.entity_id))
+                                         tail_id=entity_ex.entity_id))
         data_loader = torch.utils.data.DataLoader(
             Dataset(path='', examples=temp_examples, task=self.args.task),
             num_workers=2,
@@ -725,25 +705,36 @@ class Trainer:
         total = hr_tensor.size(0)
         entity_cnt = len(entity_dict)
         target = torch.LongTensor(target).unsqueeze(-1).to(hr_tensor.device)
+        if self.args.use_dino:
+            hr_tensor  = hr_tensor  / 0.1  # 温度缩放
+            # 对最后一个维度（特征维度 dim）进行 log_softmax
+            if self.args.dino_loss:
+                hr_tensor  = F.log_softmax(hr_tensor , dim=-1)
+            else:
+                hr_tensor = F.log_softmax(hr_tensor , dim=-1)
+
         topk_scores, topk_indices = [], []
         ranks = []
         mean_rank, mrr, hit1, hit3, hit10 = 0, 0, 0, 0, 0
-        start=0
-        all_scores=[]
+        start = 0
+        all_scores = []
         # 以 tail 为基础进行批次处理
         for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
-            end=start+batch_size
+            end = start + batch_size
             batch_dict['only_ent_embedding'] = True
             batch_dict['return_direct'] = True
             if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
-            entities_tensor=outputs['ent_vectors']
+            entities_tensor = outputs['ent_vectors']
+            if self.args.use_dino:
+                entities_tensor =F.softmax((entities_tensor - self.model.module.center) / 0.04, dim=-1)
             if self.args.use_cross_attention:
-                batch_score = self.model.compute_score(hr_tensor, entities_tensor)
+                batch_score = self.model.module.compute_score(hr_tensor, entities_tensor)
+            elif self.args.dino_loss:
+                batch_score = torch.mm(hr_tensor, entities_tensor.t())
             else:
                 batch_score = torch.mm(hr_tensor, entities_tensor.t())
-
             all_scores.append(batch_score)
         all_scores = torch.cat(all_scores, dim=1)  # total * entity_cnt
         for idx in range(all_scores.size(0)):
@@ -786,7 +777,6 @@ class Trainer:
         metrics = {'mean_rank': mean_rank, 'mrr': mrr, 'hit@1': hit1, 'hit@3': hit3, 'hit@10': hit10}
         metrics = {k: round(v / total, 4) for k, v in metrics.items()}
         assert len(topk_scores) == total
-
 
         eval_dir = 'forward' if eval_forward else 'backward'
         logger.info('{} metrics: {}'.format(eval_dir, json.dumps(metrics)))

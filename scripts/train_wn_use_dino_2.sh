@@ -27,7 +27,7 @@ python3 -u main.py \
 --neighbor-weight 0 \
 --rerank-n-hop 0 \
 --batch-size 2048 \
---print-freq 10 \
+--print-freq 20 \
 --additive-margin 0.02 \
 --use-amp \
 --pre-batch 0 \
@@ -37,4 +37,5 @@ python3 -u main.py \
 --workers 4 \
 --max-to-keep 5 \
 --use-dino \
---ema-decay 0.98 "$@"
+--dino-loss \
+--ema-decay 0.99 "$@"

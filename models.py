@@ -156,7 +156,6 @@ class DINOHead(nn.Module):
 
     def forward(self, x):
         x = self.mlp(x)
-        x = nn.functional.normalize(x, dim=-1, p=2)
         x = self.last_layer(x)
         return x
 
@@ -167,6 +166,9 @@ class BertWithDINOHead(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
     def __init__(self, bert_model_name, dino_head_params,init=False):
         """
         初始化一个包含 BERT 和 DINOHead 的模型。
@@ -212,9 +214,11 @@ class BertWithDINOHead(nn.Module):
         # 通常我们只使用 [CLS] token 的输出，即序列中第一个 token 的特征
         last_hidden_state = bert_outputs.last_hidden_state
         cls_output = last_hidden_state[:, 0, :]
+        '''
         cls_output = _pool_output("mean", cls_output, attention_mask, last_hidden_state)
         # 将所有 token 的特征传递给 DINOHead
         # DINOHead 需要支持 [batch_size, seq_len, hidden_size] 的输入
+        '''
         dino_output = self.dino_head(cls_output)
         return dino_output
 
@@ -257,6 +261,7 @@ class CustomBertModel(nn.Module, ABC):
                              persistent=False)
         self.offset = 0
         self.pre_batch_exs = [None for _ in range(num_pre_batch_vectors)]
+
         if args.add_discriminator:
             self.discriminator = torch.nn.DataParallel(BertForTextClassification(self.args.pretrained_model)).cuda()
         if args.use_moe:
@@ -298,12 +303,18 @@ class CustomBertModel(nn.Module, ABC):
                 "use_bn": False,
                 "norm_last_layer": True
             }
+            self.register_buffer("center", torch.zeros(1, dino_head_params['out_dim']))  # 中心化向量
             self.dino_config = dino_head_params
-            self.hr_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params,init=self.args.init_all)
-            self.tail_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params,init=self.args.init_all)
+            self.hr_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params)
+            self.tail_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params)
+
         else:
             self.hr_bert = AutoModel.from_pretrained(self.args.pretrained_model)
             self.tail_bert = AutoModel.from_pretrained(self.args.pretrained_model)
+
+        '''
+        
+        '''
 
         if args.use_cross_attention:
             self.cross_attention = CrossAttention(768, 768, 192, 192, 4)
@@ -317,6 +328,17 @@ class CustomBertModel(nn.Module, ABC):
             for param in self.hr_bert.parameters():
                 param.requires_grad = False
         self.tokenizer = get_tokenizer()
+
+    @torch.no_grad()
+    def update_center(self, teacher_output, center_momentum=0.9):
+        """
+        更新教师模型输出的中心向量
+        """
+        # 在 DP 模式下，不需要分布式同步，仅对当前 GPU 的 batch 进行操作
+        batch_center = torch.mean(teacher_output, dim=0, keepdim=True)  # 对 batch 维度求均值
+
+        # 动态更新中心向量（使用动量平滑）
+        self.center = self.center * center_momentum + batch_center * (1 - center_momentum)
 
     def discriminate(self, sentence):
         questions = []
@@ -417,9 +439,31 @@ class CustomBertModel(nn.Module, ABC):
             'head_vector': head_vector,
         }
 
-    def compute_logits(self, output_dict: dict, batch_dict: dict, extra_tail=None) -> dict:
+    def compute_logits(self, output_dict: dict, batch_dict: dict, extra_tail=None):
 
         hr_vector, tail_vector = output_dict['hr_vector'], output_dict['tail_vector']
+        head_vector = output_dict['head_vector']
+
+        if self.args.use_dino:
+            self.center = self.center.to(tail_vector.device)
+            tail_vector = F.softmax((tail_vector - self.center) / 0.04, dim=-1)  # softmax 归一化
+            tail_vector = tail_vector.detach()  # 分离计算图，避免反向传播到教师模型
+            head_vector = F.softmax((head_vector - self.center) / 0.04, dim=-1)  # softmax 归
+            hr_vector = hr_vector / 0.1  # 温度缩放
+            # 对最后一个维度（特征维度 dim）进行 log_softmax
+            if self.args.dino_loss:
+                hr_vector = F.log_softmax(hr_vector, dim=-1)
+                loss = torch.sum(-hr_vector * tail_vector, dim=-1)  # 每个 token 的损失
+                loss = loss.mean()  # 对 batch 和 num_tokens 求平均
+                self.update_center(tail_vector)
+                return loss
+
+            else:
+                hr_vector = F.log_softmax(hr_vector, dim=-1)
+                self.update_center( torch.cat((tail_vector, head_vector), dim=0))
+        else:
+            head_vector = output_dict['head_vector']
+
         if len(extra_tail) != 0:
             total_tail = [output_dict['tail_vector']]
             for vector in extra_tail:
@@ -438,6 +482,8 @@ class CustomBertModel(nn.Module, ABC):
                 temp_tail = tail_vector[indices]
                 hr_vector_new = self.cross_attention(hr_vector, temp_tail, self.log_inv_t.exp())
             logits = (1 - self.alpha) * hr_vector.mm(tail_vector.t()) + self.alpha * hr_vector_new.mm(tail_vector.t())
+        elif self.args.use_dino:
+            logits=torch.mm(hr_vector, tail_vector.t())
         else:
             logits = hr_vector.mm(tail_vector.t())
         batch_size = hr_vector.size(0)
@@ -445,6 +491,7 @@ class CustomBertModel(nn.Module, ABC):
 
         if self.training:
             logits -= torch.zeros(logits.size()).fill_diagonal_(self.add_margin).to(logits.device)
+
         logits *= self.log_inv_t.exp()
         triplet_mask = batch_dict.get('triplet_mask', None)
         if triplet_mask is not None:
@@ -453,7 +500,6 @@ class CustomBertModel(nn.Module, ABC):
             pre_batch_logits = self._compute_pre_batch_logits(hr_vector, tail_vector, batch_dict)
             logits = torch.cat([logits, pre_batch_logits], dim=-1)
         if self.args.use_self_negative and self.training:
-            head_vector = output_dict['head_vector']
             self_neg_logits = torch.sum(hr_vector * head_vector, dim=1) * self.log_inv_t.exp()
             self_negative_mask = batch_dict['self_negative_mask']
             self_neg_logits.masked_fill_(~self_negative_mask, -1e4)
@@ -520,5 +566,5 @@ def _pool_output(pooling: str,
         output_vector = sum_embeddings / sum_mask
     else:
         assert False, 'Unknown pooling mode: {}'.format(pooling)
-    output_vector = nn.functional.normalize(output_vector, dim=1)
+    #output_vector = nn.functional.normalize(output_vector, dim=1)
     return output_vector
