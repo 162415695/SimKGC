@@ -104,10 +104,25 @@ parser.add_argument('--remove-valid',default=False, action='store_true',
                     help='remove valid and test triples whe generate false sample')
 parser.add_argument('--use-dino',default=False, action='store_true',
                     help='use dino mode to train model')
-parser.add_argument('--ema-decay', default=0.996, type=float,
+parser.add_argument('--ema-decay-mlp', default=0.996, type=float,
+                    help='influence teacher update rate')
+parser.add_argument('--ema-decay-bert', default=0.996, type=float,
                     help='influence teacher update rate')
 parser.add_argument('--dino-loss',default=False, action='store_true',
-                    help='dino loss')
+                    help='use dino loss')
+parser.add_argument('--dino-warmup-epochs', default=10, type=int, metavar='N',
+                    help='number of dino warmup epochs to run')
+parser.add_argument('--hr-negative',default=False, action='store_true',
+                    help='use dino loss')
+
+parser.add_argument('--dino-epochs', default=10, type=int, metavar='N',
+                    help='number of full dino epochs to run')
+parser.add_argument('--dino-stop-epochs', default=10, type=int, metavar='N',
+                    help='number of dino epochs to run')
+parser.add_argument('--hard-negative-num', default=100, type=int, metavar='N',
+                    help='number of hard negative(smaller than batch size)')
+parser.add_argument('--hard-negative-weight', default=10, type=int, metavar='N',
+                    help='hard negative weight')
 args = parser.parse_args()
 '''
 args.valid_path='data/WN18RR/'

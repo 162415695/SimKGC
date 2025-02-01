@@ -92,7 +92,6 @@ class BertPredictor:
         ent_tensor_list = []
         for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
             batch_dict['only_ent_embedding'] = True
-            batch_dict['return_direct'] = True
             if self.use_cuda:
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)

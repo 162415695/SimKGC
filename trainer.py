@@ -300,26 +300,141 @@ class Trainer:
         if self.extra_batch_limit == -1 or self.extra_batch_limit > len(self.train_loader):
             self.extra_batch_limit = len(self.train_loader) - 1
             logger.info("额外batch上限因为数据量调整为" + str(self.extra_batch_limit))
-        self.momentum_schedule = utils.cosine_scheduler(self.args.ema_decay, 1, args.epochs, len(self.train_loader))
+        self.momentum_schedule_mlp = utils.cosine_scheduler(self.args.ema_decay_mlp, 1, args.dino_stop_epochs,
+                                                            len(self.train_loader))
+        self.momentum_schedule_bert = utils.cosine_scheduler(self.args.ema_decay_bert, 1, args.dino_stop_epochs,
+                                                             len(self.train_loader))
+
+    def compute_dino_loss_and_weights(self,
+                                      student_hr, student_tail, teacher_tail,
+                                      momentum=0.9, num_negatives=100, pos_weight=1.0, strong_neg_weight=3.0,
+                                      weak_neg_weight=1.0, proportion=0.5,
+                                      temperature=0.07):
+        """
+        计算两个学生模型与教师模型的 DINO 损失矩阵，基于损失选择负样本，生成权重矩阵，并更新 Center。
+
+        参数：
+        - student_hr: 学生模型的第一个输出，形状为 [batch_size, embedding_dim]
+        - student_tail: 学生模型的第二个输出，形状为 [batch_size, embedding_dim]
+        - teacher_tail: 教师模型的输出，形状为 [batch_size, embedding_dim]
+        - center: 教师的中心向量，形状为 [embedding_dim]
+        - momentum: Center 更新的动量系数
+        - num_negatives: 需要选择的负样本总数
+        - pos_weight: 正样本的权重
+        - strong_neg_weight: 显著负样本的权重
+        - weak_neg_weight: 其他负样本的权重
+        - proportion: 从第一个损失矩阵中选择负样本的比例
+        - temperature: 温度参数，用于调整教师 softmax 的分布平滑度
+
+        返回：
+        - loss_matrix1: 学生1与教师模型之间的损失矩阵
+        - loss_matrix2: 学生2与教师模型之间的损失矩阵
+        - weight_matrix1: 学生1的权重矩阵
+        - weight_matrix2: 学生2的权重矩阵
+        - updated_center: 更新后的中心向量
+        """
+        # 获取 batch_size
+        batch_size = student_hr.size(0)
+        ########## 1. 调整教师输出（减去 center） ##########
+        teacher_tail=teacher_tail.detach()
+        teacher_tail_centered = teacher_tail - self.model.module.center  # 对教师输出进行中心化
+
+        ########## 2. 计算相似度矩阵 ##########
+        # 学生与教师的相似度矩阵
+        student_sim1 = F.cosine_similarity(student_hr[:, None, :], teacher_tail_centered[None, :, :], dim=-1)
+        student_sim2 = F.cosine_similarity(student_tail[:, None, :], teacher_tail_centered[None, :, :], dim=-1)
+        # 教师的相似度矩阵
+        teacher_sim = F.cosine_similarity(teacher_tail_centered[:, None, :], teacher_tail_centered[None, :, :], dim=-1)
+
+        ########## 3. 计算 softmax 和 log-softmax ##########
+        # 计算学生模型的 log-softmax 概率分布
+        student_log_prob1 = F.log_softmax(student_sim1, dim=-1)
+        student_log_prob2 = F.log_softmax(student_sim2, dim=-1)
+        # 计算教师模型的 softmax 概率分布（带温度调节）
+        teacher_prob = F.softmax(teacher_sim / temperature, dim=-1)
+
+        ########## 4. 计算 DINO 损失矩阵 ##########
+        # 交叉熵公式：Loss = - sum(q * log(p))
+        loss_matrix1 = - (teacher_prob * student_log_prob1) # 学生1与教师的损失矩阵
+        loss_matrix2 = - (teacher_prob * student_log_prob2)  # 学生2与教师的损失矩阵
+
+        ########## 5. 初始化权重矩阵 ##########
+        # 初始化为弱负样本的权重
+        weight_matrix1 = torch.full((batch_size, batch_size), weak_neg_weight, device=student_hr.device)
+        weight_matrix2 = torch.full((batch_size, batch_size), weak_neg_weight, device=student_hr.device)
+        # 设置正样本（对角线元素）的权重
+        weight_matrix1[range(batch_size), range(batch_size)] = pos_weight
+        weight_matrix2[range(batch_size), range(batch_size)] = pos_weight
+        ########## 6. 选取负样本 ##########
+        # 创建布尔掩码，排除对角线（正样本）
+        mask = torch.eye(batch_size, dtype=torch.bool, device=student_hr.device)
+
+        # 拉平矩阵并去掉正样本
+        loss1_flat = loss_matrix1[~mask].view(batch_size, -1)
+        loss2_flat = loss_matrix2[~mask].view(batch_size, -1)
+
+        # 从第一个损失矩阵中选取显著负样本
+        num_negatives1 = int(num_negatives * proportion)  # 从第一个矩阵中选择的负样本数量
+        topk_indices1 = torch.topk(loss1_flat.view(-1), num_negatives1, largest=True).indices
+        weight_matrix1.view(-1)[topk_indices1] = strong_neg_weight
+
+        # 从第二个损失矩阵中选取显著负样本
+        num_negatives2 = num_negatives - num_negatives1  # 剩余负样本数量
+        topk_indices2 = torch.topk(loss2_flat.view(-1), num_negatives2, largest=True).indices
+        weight_matrix2.view(-1)[topk_indices2] = strong_neg_weight
+
+        ########## 7. 更新 Center ##########
+        # 计算教师输出的均值
+        teacher_mean = teacher_tail.mean(dim=0)
+        # 更新 Center
+        self.model.module.center = self.model.module.center * (1 - momentum) + teacher_mean * momentum
+
+        ########## 8. 返回结果 ##########
+        return loss_matrix1, loss_matrix2, weight_matrix1, weight_matrix2
+
+    def compute_classwise_loss_matrix(self,logit, label):
+        """
+        计算每个样本的每个类别的交叉熵损失矩阵。
+
+        参数:
+            logit (torch.Tensor): 形状为 [batch, num_classes] 的预测分数张量。
+            label (torch.Tensor): 形状为 [batch] 的真实类别索引张量。
+
+        返回:
+            torch.Tensor: 形状为 [batch, num_classes] 的损失矩阵。
+        """
+        # Step 1: 计算 log-softmax，形状为 [batch, num_classes]
+        log_softmax = F.log_softmax(logit, dim=1)
+
+        # Step 2: 创建 one-hot 标签矩阵，形状为 [batch, num_classes]
+        # 对于每个样本，将目标类别索引转化为 one-hot 向量
+        # Step 2: 构造对角选择矩阵，形状为 [batch, num_classes]
+        batch_size, num_classes = logit.shape
+        diag_matrix = torch.zeros_like(logit)  # 初始化为全 0 矩阵
+        diag_matrix[torch.arange(batch_size), label] = 1  # 对角线位置设置为 1
+        # Step 3: 根据交叉熵公式计算损失矩阵
+        # 交叉熵公式： - label[i, k] * log_softmax[i, k]
+        loss_matrix = -diag_matrix * log_softmax  # [batch, num_classes]
+
+        return loss_matrix
 
     def train_loop(self):
         if self.args.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
         epoch = 0
 
-       # self._run_eval(epoch=0, extra_batch_num=0)
-
+        # self._run_eval(epoch=0, extra_batch_num=0)
+        eval_flag = 0
         while epoch < self.args.epochs:
             # train for one epoch
-            extra_flag,loss = self.train_epoch(epoch)
+            extra_flag, loss = self.train_epoch(epoch)
             if extra_flag:
                 logger.info('已扩大batch,重新进行训练')
                 epoch = 0  # 重置为0重新开始
             else:
                 epoch += 1  # 继续到下一个epoch
-                if loss<1:
-                    logger.info('loss小于1,开始验证存储检查点')
-                    self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
+               # if epoch > self.args.epochs / 2 or epoch % 10 == 0 or eval_flag > 0.5:
+                eval_flag = self._run_eval(epoch=epoch, extra_batch_num=self.extra_batch_size)
 
     @torch.no_grad()
     def _run_eval(self, epoch, step=0, extra_batch_num=0):
@@ -337,14 +452,12 @@ class Trainer:
         delete_old_ckt(path_pattern='{}/checkpoint_*.mdl'.format(self.args.model_dir),
                        keep=self.args.max_to_keep)
 
-
         metric_dict = self.eval_entity(epoch)
         is_best = self.best_metric is None or (metric_dict['hit@1'] > self.best_metric['hit@1'])
         if is_best:
             self.best_metric = metric_dict
         copy_checkpoint(filename, is_best)
-
-
+        return metric_dict['hit@1']
 
     @torch.no_grad()
     def eval_entity(self, epoch) -> Dict:
@@ -385,13 +498,61 @@ class Trainer:
                 num_training_steps=total_steps
             )
 
+    def loss_function(self,matrix, lambda_factor=10, beta_factor=1, delta_factor=1, C=1.0,print=False):
+        diag_loss = torch.diagonal(matrix).mean()
+
+        # 非对角线元素
+        N = matrix.size(0)
+        eye_mask = torch.eye(N, device=matrix.device)
+        non_diag_elements = matrix * (1 - eye_mask)  # 只保留非对角线元素
+        non_diag_loss = non_diag_elements.mean()
+
+        # 计算最小值
+        non_diag_values = non_diag_elements[non_diag_elements > 0]
+        min_loss = non_diag_values.min()
+        '''
+        logger.info('对角线'+str(lambda_factor * diag_loss))
+        logger.info('非对角线线' + str(beta_factor * (C - non_diag_loss)))
+        logger.info('正则化' + str(delta_factor * min_loss))
+        '''
+        # 总损失
+        total_loss = (lambda_factor * diag_loss -
+                      beta_factor * non_diag_loss )
+        return total_loss
+    def loss_backward(self,loss,compute_graph=False):
+        if self.args.use_amp:
+            self.scaler.scale(loss).backward(retain_graph=compute_graph)
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            loss.backward(retain_graph=compute_graph)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+            self.optimizer.step()
+    def loss_compute(self,outputs,batch_dict,batch_size):
+        model = get_model_obj(self.model)
+        with torch.cuda.amp.autocast():
+
+
+            outputs_new= model.compute_logits(output_dict=outputs, batch_dict=batch_dict)
+        outputs_new = ModelOutput(**outputs_new)
+        logits, labels = outputs_new.logits,outputs_new.labels
+        assert logits.size(0) == batch_size
+        # head + relation -> tail
+        # loss = self.criterion(logits, labels)
+
+        loss1 = self.criterion(logits, labels)
+        loss3 = self.criterion(logits[:, :batch_size].t(), labels)
+        loss = loss1 + loss3
+        return loss
     def train_epoch(self, epoch):
         self.model.train()
         if self.extra_flag:
             prefix = "Epoch: [{}],extra_batch:[{}]".format(epoch, self.extra_batch_size)
         else:
             prefix = "Epoch: [{}]".format(epoch)
-        losses = AverageMeter('Loss', ':.6')
+        losses = AverageMeter('Loss', ':.4')
         top1 = AverageMeter('Acc@1', ':6.2f')
         top3 = AverageMeter('Acc@3', ':6.2f')
         inv_t = AverageMeter('InvT', ':6.2f')
@@ -399,12 +560,12 @@ class Trainer:
             len(self.train_loader),
             [losses, inv_t, top1, top3],
             prefix=prefix)
-
-        if self.args.dino_loss:
+        if self.args.use_dino:
             progress = ProgressMeter(
                 len(self.train_loader),
-                [losses],
+                [losses, top1, top3],
                 prefix=prefix)
+
         if self.args.add_discriminator:
             prefix = "Epoch: [{}],discriminator: ".format(epoch)
             losses_dis = AverageMeter('Loss', ':.4')
@@ -414,52 +575,57 @@ class Trainer:
                 [losses_dis, top1_dis],
                 prefix=prefix
             )
-        total_train_batch = {i: k for i, k in enumerate(self.train_loader)}
-        for i, batch_dict in total_train_batch.items():
+        if self.extra_batch_size > 0:
+            total_train_batch = {i: k for i, k in enumerate(self.train_loader)}
+        i = 0
+        for batch_dict in self.train_loader:
             self.current_steps += 1
             model = get_model_obj(self.model)
-            candidate_index = generate_random_numbers(self.extra_batch_size, i, len(total_train_batch))
+            if self.extra_batch_size > 0:
+                candidate_index = generate_random_numbers(self.extra_batch_size, -1, len(total_train_batch))
 
-            total_head_id = [d.head_id for d in batch_dict['batch_data']]
-            total_tail_id = [d.tail_id for d in batch_dict['batch_data']]
-            tail_vector = []
-            with torch.no_grad():
-                for temp_index in candidate_index:
-                    indices_to_remove = []
-                    temp_data = total_train_batch[temp_index].copy()
-                    for f in range(len(temp_data['batch_data'])):
-                        if temp_data['batch_data'][f].tail_id in total_tail_id:
-                            indices_to_remove.append(f)
-                        elif self.args.use_self_negative and temp_data['batch_data'][f].tail_id in total_head_id:
-                            indices_to_remove.append(f)
+                total_head_id = [d.head_id for d in batch_dict['batch_data']]
+                total_tail_id = [d.tail_id for d in batch_dict['batch_data']]
+                tail_vector = []
+                with torch.no_grad():
+                    for temp_index in candidate_index:
+                        indices_to_remove = []
+                        temp_data = total_train_batch[temp_index].copy()
+                        for f in range(len(temp_data['batch_data'])):
+                            if temp_data['batch_data'][f].tail_id in total_tail_id:
+                                indices_to_remove.append(f)
+                            elif self.args.use_self_negative and temp_data['batch_data'][f].tail_id in total_head_id:
+                                indices_to_remove.append(f)
+                            else:
+                                total_tail_id.append(temp_data['batch_data'][f].tail_id)
+
+                        for key in temp_data:
+                            temp_data[key] = np.delete(temp_data[key], indices_to_remove, axis=0)
+
+                        temp_data = move_to_cuda(temp_data)
+                        if self.args.use_amp:
+                            with torch.cuda.amp.autocast():
+                                tail_vector.append(model._encode(model.tail_bert,
+                                                                 token_ids=temp_data['tail_token_ids'],
+                                                                 mask=temp_data['tail_mask'],
+                                                                 token_type_ids=temp_data['tail_token_type_ids']
+                                                                 ))
                         else:
-                            total_tail_id.append(temp_data['batch_data'][f].tail_id)
-
-                    for key in temp_data:
-                        temp_data[key] = np.delete(temp_data[key], indices_to_remove, axis=0)
-
-                    temp_data = move_to_cuda(temp_data)
-                    if self.args.use_amp:
-                        with torch.cuda.amp.autocast():
                             tail_vector.append(model._encode(model.tail_bert,
                                                              token_ids=temp_data['tail_token_ids'],
                                                              mask=temp_data['tail_mask'],
                                                              token_type_ids=temp_data['tail_token_type_ids']
                                                              ))
-                    else:
-                        tail_vector.append(model._encode(model.tail_bert,
-                                                         token_ids=temp_data['tail_token_ids'],
-                                                         mask=temp_data['tail_mask'],
-                                                         token_type_ids=temp_data['tail_token_type_ids']
-                                                         ))
-            if len(candidate_index) > 0:
-                batch_dict['triplet_mask'] = construct_mask_extra_batch([ex for ex in batch_dict['batch_data']].copy(),
-                                                                        total_tail_id.copy())
-            if self.args.add_hop_mask > 0:
-                temp_mask = construct_n_hop_mask(total_head_id, total_tail_id, n_hop=self.args.add_hop_mask)
-                batch_dict['triplet_mask'] = batch_dict['triplet_mask'] & temp_mask
+                if len(candidate_index) > 0:
+                    batch_dict['triplet_mask'] = construct_mask_extra_batch(
+                        [ex for ex in batch_dict['batch_data']].copy(),
+                        total_tail_id.copy())
+                if self.args.add_hop_mask > 0:
+                    temp_mask = construct_n_hop_mask(total_head_id, total_tail_id, n_hop=self.args.add_hop_mask)
+                    batch_dict['triplet_mask'] = batch_dict['triplet_mask'] & temp_mask
+                if torch.cuda.is_available():
+                    tail_vector = move_to_cuda(tail_vector)
             if torch.cuda.is_available():
-                tail_vector = move_to_cuda(tail_vector)
                 batch_dict = move_to_cuda(batch_dict)
             '''
             if self.args.pretrained_ckpt:
@@ -476,12 +642,16 @@ class Trainer:
             else:
                 outputs = self.model(**batch_dict)
 
-            if not self.args.dino_loss:
+            if not self.args.use_dino:
+
                 with torch.cuda.amp.autocast():
-                    outputs = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
-                                               extra_tail=tail_vector)
-                outputs = ModelOutput(**outputs)
-                logits, labels = outputs.logits, outputs.labels
+                    if self.extra_batch_size > 0:
+                        outputs_new = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
+                                                       extra_tail=tail_vector)
+                    else:
+                        outputs_new = model.compute_logits(output_dict=outputs, batch_dict=batch_dict)
+                outputs_new = ModelOutput(**outputs_new)
+                logits, labels = outputs_new.logits, outputs_new.labels
                 assert logits.size(0) == batch_size
                 # head + relation -> tail
                 # loss = self.criterion(logits, labels)
@@ -492,14 +662,70 @@ class Trainer:
                 acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
                 top1.update(acc1.item(), batch_size)
                 top3.update(acc3.item(), batch_size)
-                inv_t.update(outputs.inv_t, 1)
+                inv_t.update(outputs_new.inv_t, 1)
                 losses.update(loss.item(), batch_size)
+
+
             else:
+                loss_matrix1, loss_matrix2, weight_matrix1, weight_matrix2 = self.compute_dino_loss_and_weights(
+                    outputs['hr_vector'], outputs['tail_vector'], outputs['teacher_vector'],
+                    num_negatives=self.args.hard_negative_num
+                )
+                diagonal_length = min(weight_matrix1.size(0), weight_matrix1.size(1))
+                diag_indices = torch.arange(diagonal_length)  # 对角线索引
+                factor = 1
+                weight_matrix1[diag_indices, diag_indices] *= factor
+                weight_matrix2[diag_indices, diag_indices] *= factor
 
-                loss = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
-                                               extra_tail=tail_vector)
 
-                losses.update(loss.item(), batch_size)
+                with torch.cuda.amp.autocast():
+                        outputs_new = model.compute_logits(output_dict=outputs, batch_dict=batch_dict,
+                                                       )
+                outputs_new = ModelOutput(**outputs_new)
+                logits, labels = outputs_new.logits, outputs_new.labels
+
+
+
+                 # 使用 one-hot 矩阵选择对应的类别概率，并计算交叉熵
+
+                weight = torch.maximum(weight_matrix1, weight_matrix2)
+                if self.args.use_self_negative:
+                        temp_self=torch.full((batch_size,), weight.min().item()).unsqueeze(1)
+                        temp_self = temp_self.to(weight.device)
+                        new_weight=torch.cat([weight,temp_self ],dim=-1)
+
+                if self.args.dino_loss:
+                    loss_matrix1*=weight_matrix1
+                    loss_matrix2*=weight_matrix2
+                dino_loss=self.loss_function(loss_matrix1)+self.loss_function(loss_matrix2)
+
+                loss1 = self.compute_classwise_loss_matrix(logits, labels)
+                loss3 = self.compute_classwise_loss_matrix(logits[:, :batch_size].t(), labels)
+
+                if self.args.use_self_negative:
+                    loss1*=new_weight
+                else:
+                    loss1*=weight
+                loss3*=weight
+                contrastive_loss=torch.sum(loss1,dim=-1).mean()+torch.sum(loss3,dim=-1).mean()
+                if self.args.dino_loss:
+                    contrastive_loss/=1e10
+                    loss=contrastive_loss+dino_loss
+                else:
+                    if epoch < self.args.dino_epochs:
+                            loss = contrastive_loss + dino_loss
+                    elif epoch < self.args.dino_stop_epochs:
+                            loss = contrastive_loss + dino_loss * ((epoch - self.args.dino_epochs) / (
+                                        self.args.dino_stop_epochs - self.args.dino_epochs))
+                    else:
+                            loss = contrastive_loss
+                inv_t.update(outputs_new.inv_t, 1)
+
+
+                acc1, acc3 = accuracy(logits, labels, topk=(1, 3))
+                top1.update(acc1.item(), batch_size)
+                top3.update(acc3.item(), batch_size)
+
                 '''
                 sample1 = outputs['hr_vector'].clone()
                 sample2 = outputs['tail_vector'].clone()
@@ -517,16 +743,24 @@ class Trainer:
                 '''
             self.optimizer.zero_grad()
             #if not self.args.pretrained_ckpt:
-            if self.args.use_amp:
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+            if not self.args.hr_negative:
+                self.loss_backward(loss)
             else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                self.optimizer.step()
+                #self.loss_backward(loss,True)
+                hr_output = {}
+                hr_output['tail_vector'] = outputs['hr_vector'].clone()  # 确保克隆
+                hr_output['hr_vector'] = outputs['hr_vector'].clone()  # 确保克隆
+                hr_output['head_vector'] = outputs['head_vector'].clone()
+                hr_loss=self.loss_compute(hr_output,batch_dict,batch_size)
+                #self.loss_backward(hr_loss,True)
+                tail_output = {}
+                tail_output['tail_vector'] = outputs['tail_vector'].clone()  # 确保克隆
+                tail_output['hr_vector'] = outputs['tail_vector'].clone()  # 确保克隆
+                tail_output['head_vector'] = outputs['head_vector'].clone()
+                tail_loss=self.loss_compute(tail_output,batch_dict,batch_size)
+                loss=loss+hr_loss+tail_loss
+                self.loss_backward(loss, False)
+            losses.update(loss.item(), batch_size)
 
             if self.args.add_discriminator:
                 total_head = batch_dict['head_text']
@@ -607,14 +841,39 @@ class Trainer:
                             else:
                                 logger.info("尾实体数量已达到预定义上限,修改请参考extra-batch-limit参数")
                                 self.extra_flag = False
-        if self.args.use_dino:
+            i += 1
+        if self.args.use_dino and epoch < self.args.dino_stop_epochs:
+            #if self.current_steps %100==0:
+            if epoch < self.args.dino_warmup_epochs and not self.args.dino_loss:
+                m_mlp = 0
+                m_bert = 0
+            else:
+                m_mlp = self.momentum_schedule_mlp[self.current_steps - 1]  # 当前动量值
+                m_bert = self.momentum_schedule_bert[self.current_steps - 1]  # 当前动量值
             with torch.no_grad():
-                m = self.momentum_schedule[self.current_steps]  # 当前动量值
-                for param_q, param_k in zip(self.model.module.hr_bert.parameters(),
-                                            self.model.module.tail_bert.parameters()):
-                    param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+                '''
+                    if self.args.pretrained_ckpt:
+                        for param_q, param_k in zip(self.model.module.hr_bert.dino_head.parameters(),
+                                                    self.model.module.teacher_model.dino_head.parameters()):
+                            param_k.data.mul_(m).add_((1 - m) * param_q.detach().data)
+                    else:
+'''
+                m = m_mlp
+                for param_hr, param_tail, param_teacher in zip(self.model.module.hr_bert.dino_head.parameters(),
+                                                               self.model.module.tail_bert.dino_head.parameters(),
+                                                               self.model.module.teacher_model.dino_head.parameters()):
+                    param_teacher.data.mul_(m).add_((1 - m) * (0.5 * param_hr.detach().data
+                                                               + 0.5 * param_tail.detach().data))
+                m = m_bert
+                for param_hr, param_tail, param_teacher in zip(self.model.module.hr_bert.bert.parameters(),
+                                                               self.model.module.tail_bert.bert.parameters(),
+                                                               self.model.module.teacher_model.bert.parameters()):
+                    param_teacher.data.mul_(m).add_((1 - m) * (0.5 * param_hr.detach().data
+                                                               + 0.5 * param_tail.detach().data))
+
+
         logger.info('Learning rate: {}'.format(self.scheduler.get_last_lr()[0]))
-        return False,loss.detach()
+        return False, loss.detach()
 
     def _setup_training(self):
         if torch.cuda.device_count() > 1:
@@ -668,7 +927,6 @@ class Trainer:
         ent_tensor_list = []
         for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
             batch_dict['only_ent_embedding'] = True
-            batch_dict['return_direct'] = True
             if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
@@ -705,6 +963,7 @@ class Trainer:
         total = hr_tensor.size(0)
         entity_cnt = len(entity_dict)
         target = torch.LongTensor(target).unsqueeze(-1).to(hr_tensor.device)
+        '''
         if self.args.use_dino:
             hr_tensor  = hr_tensor  / 0.1  # 温度缩放
             # 对最后一个维度（特征维度 dim）进行 log_softmax
@@ -712,27 +971,21 @@ class Trainer:
                 hr_tensor  = F.log_softmax(hr_tensor , dim=-1)
             else:
                 hr_tensor = F.log_softmax(hr_tensor , dim=-1)
-
-        topk_scores, topk_indices = [], []
-        ranks = []
-        mean_rank, mrr, hit1, hit3, hit10 = 0, 0, 0, 0, 0
+'''
         start = 0
         all_scores = []
         # 以 tail 为基础进行批次处理
         for idx, batch_dict in enumerate(tqdm.tqdm(data_loader)):
             end = start + batch_size
             batch_dict['only_ent_embedding'] = True
-            batch_dict['return_direct'] = True
             if torch.cuda.is_available():
                 batch_dict = move_to_cuda(batch_dict)
             outputs = self.model(**batch_dict)
             entities_tensor = outputs['ent_vectors']
             if self.args.use_dino:
-                entities_tensor =F.softmax((entities_tensor - self.model.module.center) / 0.04, dim=-1)
+                entities_tensor = entities_tensor
             if self.args.use_cross_attention:
                 batch_score = self.model.module.compute_score(hr_tensor, entities_tensor)
-            elif self.args.dino_loss:
-                batch_score = torch.mm(hr_tensor, entities_tensor.t())
             else:
                 batch_score = torch.mm(hr_tensor, entities_tensor.t())
             all_scores.append(batch_score)

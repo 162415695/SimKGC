@@ -153,23 +153,15 @@ class DINOHead(nn.Module):
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-
     def forward(self, x):
         x = self.mlp(x)
+        #x = nn.functional.normalize(x, dim=-1, p=2)
         x = self.last_layer(x)
         return x
 
 
 class BertWithDINOHead(nn.Module):
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-    def __init__(self, bert_model_name, dino_head_params,init=False):
+    def __init__(self, bert_model_name, dino_head_params):
         """
         初始化一个包含 BERT 和 DINOHead 的模型。
         :param bert_model_name: BERT 的预训练模型名称（如 'bert-base-uncased'）。
@@ -179,8 +171,6 @@ class BertWithDINOHead(nn.Module):
 
         # 加载预训练的 BERT 模型
         self.bert = BertModel.from_pretrained(bert_model_name)
-        if init:
-            self.bert.init_weights()
         # 禁用 BERT 的分类头
         self.bert.pooler = None  # 去掉 BERT 的池化层
         self.bert.classifier = nn.Identity()  # 避免分类头的干扰
@@ -198,8 +188,6 @@ class BertWithDINOHead(nn.Module):
             use_bn=dino_head_params.get('use_bn', False),
             norm_last_layer=dino_head_params.get('norm_last_layer', True)
         )
-        self.apply(self._init_weights)
-
 
     def forward(self, input_ids, attention_mask=None, token_type_ids=None,return_dict=False):
         """
@@ -214,13 +202,20 @@ class BertWithDINOHead(nn.Module):
         # 通常我们只使用 [CLS] token 的输出，即序列中第一个 token 的特征
         last_hidden_state = bert_outputs.last_hidden_state
         cls_output = last_hidden_state[:, 0, :]
-        '''
-        cls_output = _pool_output("mean", cls_output, attention_mask, last_hidden_state)
+
+        #cls_output = _pool_output("mean", cls_output, attention_mask, last_hidden_state)
         # 将所有 token 的特征传递给 DINOHead
         # DINOHead 需要支持 [batch_size, seq_len, hidden_size] 的输入
-        '''
         dino_output = self.dino_head(cls_output)
         return dino_output
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
 
 class BertForTextClassification(nn.Module):
@@ -243,6 +238,50 @@ class BertForTextClassification(nn.Module):
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
         return logits.squeeze(-1)
+
+
+class DINOLoss(nn.Module):
+    def __init__(self, out_dim, ncrops, student_temp=0.1,
+                 center_momentum=0.9):
+        super().__init__()
+        self.student_temp = student_temp
+        self.center_momentum = center_momentum
+        self.ncrops = ncrops
+        self.register_buffer("center", torch.zeros(1, out_dim))
+        # we apply a warm up for the teacher temperature because
+        # a too high temperature makes the training instable at the beginning
+
+    def forward(self, student_output_1, student_output_2, teacher_output):
+        """
+        Cross-entropy between softmax outputs of the teacher and student networks.
+        """
+        student_output = [student_output_1, student_output_2]
+        student_out = [_output / self.student_temp for _output in student_output]
+
+        # teacher centering and sharpening
+        temp = 0.04
+        teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
+        teacher_out = teacher_out.detach()
+        total_loss = 0
+        n_loss_terms = 0
+        for v in range(len(student_out)):
+            loss = torch.sum(-teacher_out * F.log_softmax(student_out[v], dim=-1), dim=-1)
+            total_loss += loss.mean()
+            n_loss_terms += 1
+        total_loss /= n_loss_terms
+        self.update_center(teacher_output)
+        return total_loss
+
+    @torch.no_grad()
+    def update_center(self, teacher_output, center_momentum=0.9):
+        """
+        更新教师模型输出的中心向量
+        """
+        # 在 DP 模式下，不需要分布式同步，仅对当前 GPU 的 batch 进行操作
+        batch_center = torch.mean(teacher_output, dim=0, keepdim=True)  # 对 batch 维度求均值
+
+        # 动态更新中心向量（使用动量平滑）
+        self.center = self.center * center_momentum + batch_center * (1 - center_momentum)
 
 
 class CustomBertModel(nn.Module, ABC):
@@ -294,21 +333,34 @@ class CustomBertModel(nn.Module, ABC):
             self.hr_bert = get_peft_model(AutoModel.from_pretrained(self.args.pretrained_model), config)
             self.tail_bert = AutoModel.from_pretrained(self.args.pretrained_model)
         elif self.args.use_dino:
-
             dino_head_params = {
-                "out_dim": 65536,  # 输出维度（通常为对比学习任务中的高维特征）
-                "hidden_dim": 2048,
+                "out_dim": 1024,
+                "hidden_dim": 1024,
                 "bottleneck_dim": 256,
                 "nlayers": 3,
-                "use_bn": False,
-                "norm_last_layer": True
+                "use_bn": False,  # 对文本数据更稳定
+                "norm_last_layer": True  # 必须保持
             }
-            self.register_buffer("center", torch.zeros(1, dino_head_params['out_dim']))  # 中心化向量
+            self.register_buffer("center", torch.zeros(1, dino_head_params['out_dim']))
+
             self.dino_config = dino_head_params
             self.hr_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params)
             self.tail_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params)
-
+            self.teacher_model =  BertWithDINOHead(self.args.pretrained_model, dino_head_params)
+            #self.dino_loss = DINOLoss(dino_head_params['out_dim'], 2)
+            for param in self.teacher_model.parameters():
+                param.requires_grad = False
         else:
+            dino_head_params = {
+                "out_dim": 1024,
+                "hidden_dim": 1024,
+                "bottleneck_dim": 256,
+                "nlayers": 3,
+                "use_bn": False,  # 对文本数据更稳定
+                "norm_last_layer": True  # 必须保持
+            }
+            #self.hr_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params)
+            #self.tail_bert = BertWithDINOHead(self.args.pretrained_model, dino_head_params)
             self.hr_bert = AutoModel.from_pretrained(self.args.pretrained_model)
             self.tail_bert = AutoModel.from_pretrained(self.args.pretrained_model)
 
@@ -322,7 +374,7 @@ class CustomBertModel(nn.Module, ABC):
             #self.total_tail_mask = None
             #self.l1 = CustomL1Loss()
             self.alpha = torch.nn.Parameter(torch.tensor(0.5), requires_grad=True)
-        if self.args.pretrained_ckpt and not self.args.use_lora:
+        if self.args.pretrained_ckpt and not self.args.use_lora and not self.args.use_dino:
             for param in self.tail_bert.parameters():
                 param.requires_grad = False
             for param in self.hr_bert.parameters():
@@ -362,12 +414,13 @@ class CustomBertModel(nn.Module, ABC):
 
     def _encode(self, encoder, token_ids, mask, token_type_ids):
         try:
+
             outputs = encoder(input_ids=token_ids,
                               attention_mask=mask,
                               token_type_ids=token_type_ids,
                               return_dict=True)
-        except:
 
+        except:
             outputs = encoder(input_ids=token_ids,
                               attention_mask=mask,
                               return_dict=True)
@@ -383,21 +436,37 @@ class CustomBertModel(nn.Module, ABC):
                 tail_token_ids, tail_mask, tail_token_type_ids,
                 head_token_ids, head_mask, head_token_type_ids,
                 rel_token_ids, rel_mask, rel_token_type_ids,
-                only_ent_embedding=False, return_direct=False, **kwargs) -> dict:
+                only_ent_embedding=False, **kwargs) -> dict:
+
+        if self.args.use_dino:
+            tail_vector = self._encode(self.tail_bert,
+                                            token_ids=tail_token_ids,
+                                            mask=tail_mask,
+                                            token_type_ids=tail_token_type_ids)
+            if only_ent_embedding:
+                return {'ent_vectors': tail_vector.detach()}
+            hr_vector = self._encode(self.hr_bert,
+                                     token_ids=hr_token_ids,
+                                     mask=hr_mask,
+                                     token_type_ids=hr_token_type_ids)
+            teacher_vector = self._encode(self.teacher_model,
+                                       token_ids=tail_token_ids,
+                                       mask=tail_mask,
+                                       token_type_ids=tail_token_type_ids)
+            head_vector = self._encode(self.tail_bert,
+                                       token_ids=head_token_ids,
+                                       mask=head_mask,
+                                       token_type_ids=head_token_type_ids)
+            return {
+                'hr_vector': hr_vector,
+                'tail_vector': tail_vector,
+                'head_vector':head_vector,
+                'teacher_vector': teacher_vector,
+            }
         if only_ent_embedding:
             return self.predict_ent_embedding(tail_token_ids=tail_token_ids,
                                               tail_mask=tail_mask,
                                               tail_token_type_ids=tail_token_type_ids)
-        if self.args.use_dino:
-            with torch.no_grad():
-                tail_vector = self._encode(self.tail_bert,
-                                           token_ids=tail_token_ids,
-                                           mask=tail_mask,
-                                           token_type_ids=tail_token_type_ids)
-                head_vector = self._encode(self.tail_bert,
-                                           token_ids=head_token_ids,
-                                           mask=head_mask,
-                                           token_type_ids=head_token_type_ids)
         else:
             tail_vector = self._encode(self.tail_bert,
                                        token_ids=tail_token_ids,
@@ -439,30 +508,44 @@ class CustomBertModel(nn.Module, ABC):
             'head_vector': head_vector,
         }
 
+    def compute_dino_loss(self, output_dict):
+        hr_vector, tail_vector = output_dict['hr_vector'], output_dict['tail_vector']
+        teacher_vector=output_dict['teacher_vector']
+        return self.dino_loss(hr_vector, tail_vector, teacher_vector)
+
+    def mask_logits(self,logits,rate):
+        batch_size = logits.size(0)
+        if batch_size <= 1:
+            return logits  # 无需处理
+
+        # 生成随机数矩阵，排除对角线元素
+        rand_matrix = torch.rand_like(logits)
+        rows = torch.arange(batch_size)
+        rand_matrix[rows, rows] = -1  # 使对角线元素不会被选中
+
+        # 计算每行需要屏蔽的数量（四舍五入）
+        non_diag_count = batch_size - 1
+        k = int(round(rate * non_diag_count))
+        if k <= 0:
+            return logits
+
+        # 选取每行最大的k个随机数索引作为屏蔽位置
+        _, topk_indices = torch.topk(rand_matrix, k=k, dim=1)
+        mask = torch.zeros_like(logits, dtype=torch.bool)
+        mask.scatter_(1, topk_indices, True)
+
+        # 确保对角线不被屏蔽
+        mask[rows, rows] = False
+
+        # 应用屏蔽
+        logits.masked_fill_(mask, -1e4)
+        return logits
     def compute_logits(self, output_dict: dict, batch_dict: dict, extra_tail=None):
 
+        if extra_tail is None:
+            extra_tail = []
         hr_vector, tail_vector = output_dict['hr_vector'], output_dict['tail_vector']
         head_vector = output_dict['head_vector']
-
-        if self.args.use_dino:
-            self.center = self.center.to(tail_vector.device)
-            tail_vector = F.softmax((tail_vector - self.center) / 0.04, dim=-1)  # softmax 归一化
-            tail_vector = tail_vector.detach()  # 分离计算图，避免反向传播到教师模型
-            head_vector = F.softmax((head_vector - self.center) / 0.04, dim=-1)  # softmax 归
-            hr_vector = hr_vector / 0.1  # 温度缩放
-            # 对最后一个维度（特征维度 dim）进行 log_softmax
-            if self.args.dino_loss:
-                hr_vector = F.log_softmax(hr_vector, dim=-1)
-                loss = torch.sum(-hr_vector * tail_vector, dim=-1)  # 每个 token 的损失
-                loss = loss.mean()  # 对 batch 和 num_tokens 求平均
-                self.update_center(tail_vector)
-                return loss
-
-            else:
-                hr_vector = F.log_softmax(hr_vector, dim=-1)
-                self.update_center( torch.cat((tail_vector, head_vector), dim=0))
-        else:
-            head_vector = output_dict['head_vector']
 
         if len(extra_tail) != 0:
             total_tail = [output_dict['tail_vector']]
@@ -482,8 +565,6 @@ class CustomBertModel(nn.Module, ABC):
                 temp_tail = tail_vector[indices]
                 hr_vector_new = self.cross_attention(hr_vector, temp_tail, self.log_inv_t.exp())
             logits = (1 - self.alpha) * hr_vector.mm(tail_vector.t()) + self.alpha * hr_vector_new.mm(tail_vector.t())
-        elif self.args.use_dino:
-            logits=torch.mm(hr_vector, tail_vector.t())
         else:
             logits = hr_vector.mm(tail_vector.t())
         batch_size = hr_vector.size(0)
@@ -491,8 +572,11 @@ class CustomBertModel(nn.Module, ABC):
 
         if self.training:
             logits -= torch.zeros(logits.size()).fill_diagonal_(self.add_margin).to(logits.device)
+        if self.args.use_dino:
+            logits*=20
+        else:
+            logits *= self.log_inv_t.exp()
 
-        logits *= self.log_inv_t.exp()
         triplet_mask = batch_dict.get('triplet_mask', None)
         if triplet_mask is not None:
             logits.masked_fill_(~triplet_mask, -1e4)

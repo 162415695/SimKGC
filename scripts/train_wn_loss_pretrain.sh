@@ -48,5 +48,5 @@ python3 -u main.py \
 --workers 4 \
 --max-to-keep 5 \
 --warmup 0 \
---pretrained-ckpt /mnt/data/yhy/projects/SimKGC/checkpoint/WN18RR_bert_base_best/model_last.mdl \
+--pretrained-ckpt /mnt/data/yhy/projects/SimKGC_git/checkpoint/WN18RR_bert_base_best/model_last.mdl \
 --use-special-loss "$@"
